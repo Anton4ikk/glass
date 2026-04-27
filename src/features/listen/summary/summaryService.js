@@ -113,7 +113,7 @@ Please build upon this context while analyzing the new conversation segments.
                     role: 'user',
                     content: `${contextualPrompt}
 
-Analyze the conversation and provide a structured summary. Format your response as follows:
+Analyze the conversation and provide a structured summary. Respond in the same language as the conversation (e.g., if the conversation is in French, respond in French; if in English, respond in English). Format your response as follows:
 
 **Summary Overview**
 - Main discussion point with context

@@ -150,7 +150,7 @@ class SttService {
     }
 
     async initializeSttSessions(language = 'en') {
-        const effectiveLanguage = process.env.OPENAI_TRANSCRIBE_LANG || language || 'en';
+        const effectiveLanguage = (process.env.OPENAI_TRANSCRIBE_LANG || language || 'en').trim();
 
         const modelInfo = await modelStateService.getCurrentModelInfo('stt');
         if (!modelInfo || !modelInfo.apiKey) {
@@ -595,6 +595,7 @@ class SttService {
         }
 
         await this.theirSttSession.sendRealtimeInput(payload);
+        return { success: true };
     }
 
     killExistingSystemAudioDump() {

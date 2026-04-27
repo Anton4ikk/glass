@@ -85,13 +85,24 @@ module.exports = {
     ipcMain.handle('ask:closeAskWindow',  async () => await askService.closeAskWindow());
     
     // Listen
-    ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) => await listenService.handleSendMicAudioContent(data, mimeType));
+    let _micAudioCount = 0;
+    ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) => {
+        _micAudioCount++;
+        if (_micAudioCount <= 3 || _micAudioCount % 50 === 0) console.log(`[Bridge] sendMicAudio #${_micAudioCount}`);
+        return await listenService.handleSendMicAudioContent(data, mimeType);
+    });
+    let _sysAudioCount = 0;
     ipcMain.handle('listen:sendSystemAudio', async (event, { data, mimeType }) => {
+        _sysAudioCount++;
+        if (_sysAudioCount <= 3 || _sysAudioCount % 50 === 0) console.log(`[Bridge] sendSystemAudio #${_sysAudioCount}`);
         const result = await listenService.sttService.sendSystemAudioContent(data, mimeType);
         if(result.success) {
             listenService.sendToRenderer('system-audio-data', { data });
         }
         return result;
+    });
+    ipcMain.on('listen:rendererLog', (event, msg) => {
+        console.log('[RendererLog]', msg);
     });
     ipcMain.handle('listen:startMacosSystemAudio', async () => await listenService.handleStartMacosAudio());
     ipcMain.handle('listen:stopMacosSystemAudio', async () => await listenService.handleStopMacosAudio());

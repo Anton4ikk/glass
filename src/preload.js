@@ -288,6 +288,7 @@ contextBridge.exposeInMainWorld('api', {
     sendSystemAudioContent: (data) => ipcRenderer.invoke('listen:sendSystemAudio', data),
     startMacosSystemAudio: () => ipcRenderer.invoke('listen:startMacosSystemAudio'),
     stopMacosSystemAudio: () => ipcRenderer.invoke('listen:stopMacosSystemAudio'),
+    log: (msg) => ipcRenderer.send('listen:rendererLog', msg),
     
     // Session Management
     isSessionActive: () => ipcRenderer.invoke('listen:isSessionActive'),

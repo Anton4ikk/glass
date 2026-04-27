@@ -132,3 +132,45 @@ We have a list of [help wanted](https://github.com/pickle-com/glass/issues?q=is%
 
 ## Star History
 [![Star History Chart](https://api.star-history.com/svg?repos=pickle-com/glass&type=Date)](https://www.star-history.com/#pickle-com/glass&Date)
+
+---
+
+## Fork — mickaelleclercq/glass
+
+This is a personal fork of [pickle-com/glass](https://github.com/pickle-com/glass) with ongoing improvements and experiments. Changes are documented here as the project evolves.
+
+### Changes & Improvements
+
+#### 🎙️ OpenAI STT — Full Reconnect & Dual-Session Architecture
+- Rewrote `createSTT` in `src/features/common/ai/providers/openai.js` with automatic WebSocket reconnection on unexpected close
+- Separate VAD (Voice Activity Detection) tuning per session type:
+  - **Mic (self)**: threshold `0.1`, silence `500ms`, near-field noise reduction enabled
+  - **System audio (their)**: threshold `0.05`, silence `1000ms`, prefix padding `500ms`, no noise reduction
+- Forced `input_audio_buffer.commit` every 3 seconds for system audio to avoid stuck transcriptions
+- Added `keepAlive()` ping method to prevent WebSocket idle timeouts
+- Portkey virtual key routing support (`usePortkey` flag)
+- Model: `gpt-4o-mini-transcribe`
+
+#### 🔊 Audio Capture — Gain Boost & Diagnostics
+- Added **4× gain boost** for both mic and system audio streams (clamped to [-1, 1]) to improve transcription accuracy in low-volume scenarios
+- WASM AEC (Acoustic Echo Cancellation) temporarily disabled while diagnosing audio pipeline issues
+- System audio now reuses the existing mic `AudioContext` to avoid suspended-context issues on Chromium
+- Added RMS diagnostic logging for the first 10 audio chunks and any chunk with speech-level signal (`rms > 0.01`)
+
+#### 🤖 New AI Models
+- Added `gpt-4.1-mini` and `gpt-5.4-nano` to the OpenAI LLM model list
+
+#### 🌍 Multilingual Summaries
+- Summary prompt updated to instruct the model to respond in the **same language as the conversation** (French, English, etc.)
+
+#### 🛠 Developer Experience
+- DevTools no longer open automatically in dev builds — now controlled by the `GLASS_DEVTOOLS` environment variable:
+  - `GLASS_DEVTOOLS=1` — opens DevTools for all windows
+  - `GLASS_DEVTOOLS=listen` — opens DevTools only for the listen window
+- Added `listen:rendererLog` IPC channel so renderer processes can send logs to the main process console
+- Added diagnostic counters on `listen:sendMicAudio` and `listen:sendSystemAudio` IPC calls
+- Exposed `window.api.log(msg)` in the renderer preload for easy main-process logging
+
+#### 🐛 Bug Fixes
+- `sttService`: added `.trim()` on the language code to prevent whitespace-caused initialization failures
+- `sttService`: `sendSystemAudioContent` now correctly returns `{ success: true }` so the bridge can forward audio to the renderer

@@ -41,7 +41,7 @@ class OpenAIProvider {
  * @param {string} [opts.portkeyVirtualKey] - Portkey virtual key
  * @returns {Promise<object>} STT session
  */
-async function createSTT({ apiKey, language = 'en', callbacks = {}, usePortkey = false, portkeyVirtualKey, ...config }) {
+async function createSTT({ apiKey, language = 'en', callbacks = {}, usePortkey = false, portkeyVirtualKey, sessionType = 'unknown', ...config }) {
   const keyType = usePortkey ? 'vKey' : 'apiKey';
   const key = usePortkey ? (portkeyVirtualKey || apiKey) : apiKey;
 
@@ -50,107 +50,120 @@ async function createSTT({ apiKey, language = 'en', callbacks = {}, usePortkey =
     : 'wss://api.portkey.ai/v1/realtime?intent=transcription';
 
   const headers = keyType === 'apiKey'
-    ? {
-        'Authorization': `Bearer ${key}`,
-        'OpenAI-Beta': 'realtime=v1',
+    ? { 'Authorization': `Bearer ${key}`, 'OpenAI-Beta': 'realtime=v1' }
+    : { 'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu', 'x-portkey-virtual-key': key, 'OpenAI-Beta': 'realtime=v1' };
+
+  const isTheirSession = sessionType === 'their';
+
+  const sessionUpdatePayload = JSON.stringify({
+    type: 'transcription_session.update',
+    session: {
+      input_audio_format: 'pcm16',
+      input_audio_transcription: {
+        model: 'gpt-4o-mini-transcribe',
+        prompt: config.prompt || '',
+        language: language || 'en'
+      },
+      turn_detection: {
+        type: 'server_vad',
+        threshold: isTheirSession ? 0.05 : 0.1,
+        prefix_padding_ms: isTheirSession ? 500 : 200,
+        silence_duration_ms: isTheirSession ? 1000 : 500,
+      },
+      ...(isTheirSession ? {} : { input_audio_noise_reduction: { type: 'near_field' } })
+    }
+  });
+
+  // Mutable references updated on each reconnect
+  let activeWs = null;
+  let forceCommitInterval = null;
+  let userClosed = false;
+  let reconnectTimer = null;
+
+  // Session handle returned to callers – methods close over mutable activeWs
+  const session = {
+    sendRealtimeInput(audioData) {
+      if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+        activeWs.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: audioData }));
       }
-    : {
-        'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu',
-        'x-portkey-virtual-key': key,
-        'OpenAI-Beta': 'realtime=v1',
-      };
+    },
+    keepAlive() {
+      try {
+        if (activeWs && activeWs.readyState === WebSocket.OPEN) activeWs.ping();
+      } catch (err) {
+        console.error('[OpenAI STT] keepAlive error:', err.message);
+      }
+    },
+    close() {
+      userClosed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (forceCommitInterval) { clearInterval(forceCommitInterval); forceCommitInterval = null; }
+      if (activeWs && activeWs.readyState === WebSocket.OPEN) {
+        activeWs.send(JSON.stringify({ type: 'session.close' }));
+        activeWs.onmessage = activeWs.onerror = () => {};
+        activeWs.close(1000, 'Client initiated close.');
+      }
+    }
+  };
 
-  const ws = new WebSocket(wsUrl, { headers });
+  function connect(onFirstOpen) {
+    const ws = new WebSocket(wsUrl, { headers });
+    activeWs = ws;
 
-  return new Promise((resolve, reject) => {
     ws.onopen = () => {
-      console.log("WebSocket session opened.");
+      console.log(`WebSocket session opened [${sessionType}].`);
+      ws.send(sessionUpdatePayload);
+      console.log(`[OpenAI STT ${sessionType}] Session config: threshold=${isTheirSession ? 0.05 : 0.1} noise_reduction: ${isTheirSession ? 'none' : 'near_field'}`);
 
-      const sessionConfig = {
-        type: 'transcription_session.update',
-        session: {
-          input_audio_format: 'pcm16',
-          input_audio_transcription: {
-            model: 'gpt-4o-mini-transcribe',
-            prompt: config.prompt || '',
-            language: language || 'en'
-          },
-          turn_detection: {
-            type: 'server_vad',
-            threshold: 0.5,
-            prefix_padding_ms: 200,
-            silence_duration_ms: 100,
-          },
-          input_audio_noise_reduction: {
-            type: 'near_field'
+      if (isTheirSession) {
+        if (forceCommitInterval) clearInterval(forceCommitInterval);
+        forceCommitInterval = setInterval(() => {
+          if (activeWs === ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+            console.log(`[OpenAI STT their] force-commit sent`);
           }
-        }
-      };
-      
-      ws.send(JSON.stringify(sessionConfig));
+        }, 3000);
+      }
 
-      // Helper to periodically keep the websocket alive
-      const keepAlive = () => {
-        try {
-          if (ws.readyState === WebSocket.OPEN) {
-            // The ws library supports native ping frames which are ideal for heart-beats
-            ws.ping();
-          }
-        } catch (err) {
-          console.error('[OpenAI STT] keepAlive error:', err.message);
-        }
-      };
-
-      resolve({
-        sendRealtimeInput: (audioData) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            const message = {
-              type: 'input_audio_buffer.append',
-              audio: audioData
-            };
-            ws.send(JSON.stringify(message));
-          }
-        },
-        // Expose keepAlive so higher-level services can schedule heart-beats
-        keepAlive,
-        close: () => {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'session.close' }));
-            ws.onmessage = ws.onerror = () => {};  // 핸들러 제거
-            ws.close(1000, 'Client initiated close.');
-          }
-        }
-      });
+      if (onFirstOpen) onFirstOpen(session);
     };
 
     ws.onmessage = (event) => {
-      // ── 종료·하트비트 패킷 필터링 ──────────────────────────────
       if (!event.data || event.data === 'null' || event.data === '[DONE]') return;
-
       let msg;
-      try { msg = JSON.parse(event.data); }
-      catch { return; }                       // JSON 파싱 실패 무시
-
+      try { msg = JSON.parse(event.data); } catch { return; }
       if (!msg || typeof msg !== 'object') return;
 
-      msg.provider = 'openai';                // ← 항상 명시
+      const silentTypes = isTheirSession ? [] : ['input_audio_buffer.committed'];
+      if (!silentTypes.includes(msg.type)) {
+        console.log(`[OpenAI WS ${sessionType}]`, msg.type, JSON.stringify(msg).substring(0, 150));
+      }
+
+      msg.provider = 'openai';
       callbacks.onmessage?.(msg);
     };
 
     ws.onerror = (error) => {
-      console.error('WebSocket error:', error.message);
-      if (callbacks && callbacks.onerror) {
-        callbacks.onerror(error);
-      }
-      reject(error);
+      console.error(`[OpenAI STT ${sessionType}] WebSocket error:`, error.message);
+      callbacks.onerror?.(error);
     };
 
     ws.onclose = (event) => {
-      console.log(`WebSocket closed: ${event.code} ${event.reason}`);
-      if (callbacks && callbacks.onclose) {
-        callbacks.onclose(event);
+      console.log(`[OpenAI STT ${sessionType}] WebSocket closed: code=${event.code} reason='${event.reason}'`);
+      if (forceCommitInterval && activeWs === ws) { clearInterval(forceCommitInterval); forceCommitInterval = null; }
+      callbacks.onclose?.(event);
+      if (!userClosed) {
+        console.log(`[OpenAI STT ${sessionType}] Reconnecting in 3s...`);
+        reconnectTimer = setTimeout(() => connect(null), 3000);
       }
     };
+  }
+
+  return new Promise((resolve, reject) => {
+    connect(resolve);
+    // Reject promise on initial connection error (no-op if already resolved)
+    const origError = activeWs.onerror;
+    activeWs.onerror = (error) => { origError?.(error); reject(error); };
   });
 }
 
@@ -165,7 +178,7 @@ async function createSTT({ apiKey, language = 'en', callbacks = {}, usePortkey =
  * @param {string} [opts.portkeyVirtualKey] - Portkey virtual key
  * @returns {object} LLM instance
  */
-function createLLM({ apiKey, model = 'gpt-4.1', temperature = 0.7, maxTokens = 2048, usePortkey = false, portkeyVirtualKey, ...config }) {
+function createLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxTokens = 2048, usePortkey = false, portkeyVirtualKey, ...config }) {
   const client = new OpenAI({ apiKey });
   
   const callApi = async (messages) => {
@@ -261,7 +274,7 @@ function createLLM({ apiKey, model = 'gpt-4.1', temperature = 0.7, maxTokens = 2
  * @param {string} [opts.portkeyVirtualKey] - Portkey virtual key
  * @returns {object} Streaming LLM instance
  */
-function createStreamingLLM({ apiKey, model = 'gpt-4.1', temperature = 0.7, maxTokens = 2048, usePortkey = false, portkeyVirtualKey, ...config }) {
+function createStreamingLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxTokens = 2048, usePortkey = false, portkeyVirtualKey, ...config }) {
   return {
     streamChat: async (messages) => {
       const fetchUrl = usePortkey 

@@ -313,19 +313,36 @@ async function setupMicProcessing(micStream) {
             let chunk = audioBuffer.splice(0, samplesPerChunk);
             let processedChunk = new Float32Array(chunk); // 기본값
 
-            // ───────────────── WASM AEC ─────────────────
-            if (systemAudioBuffer.length > 0) {
-                const latest = systemAudioBuffer[systemAudioBuffer.length - 1];
-                const sysF32 = base64ToFloat32Array(latest.data);
+            // ───────────────── WASM AEC (temporarily disabled for diagnosis) ─────────────────
+            // if (systemAudioBuffer.length > 0) {
+            //     const latest = systemAudioBuffer[systemAudioBuffer.length - 1];
+            //     const sysF32 = base64ToFloat32Array(latest.data);
+            //     processedChunk = runAecSync(new Float32Array(chunk), sysF32);
+            // } else {
+            //     console.log('🔊 No system audio for AEC reference');
+            // }
 
-                // **음성 구간일 때만 런**
-                processedChunk = runAecSync(new Float32Array(chunk), sysF32);
-                // console.log('🔊 Applied WASM-AEC (speex)');
-            } else {
-                console.log('🔊 No system audio for AEC reference');
+            // ── Gain boost: amplify mic input ──
+            const GAIN = 4.0;
+            const boosted = new Float32Array(processedChunk.length);
+            for (let i = 0; i < processedChunk.length; i++) {
+                boosted[i] = Math.max(-1, Math.min(1, processedChunk[i] * GAIN));
             }
 
-            const pcm16 = convertFloat32ToInt16(processedChunk);
+            // ── Diagnostic: log first 10 chunks + any chunk with RMS > 0.01 (speech) ──
+            if (audioBuffer._diagCount === undefined) audioBuffer._diagCount = 0;
+            audioBuffer._diagCount++;
+            {
+                let sumSq = 0;
+                for (let i = 0; i < boosted.length; i++) sumSq += boosted[i] * boosted[i];
+                const rms = Math.sqrt(sumSq / boosted.length);
+                if (audioBuffer._diagCount <= 10 || rms > 0.01) {
+                    console.log(`[MicRMS] chunk #${audioBuffer._diagCount} rms=${rms.toFixed(6)} max=${Math.max(...boosted).toFixed(4)}`);
+                }
+            }
+            // ── End diagnostic ──
+
+            const pcm16 = convertFloat32ToInt16(boosted);
             const b64 = arrayBufferToBase64(pcm16.buffer);
 
             window.api.listenCapture.sendMicAudioContent({
@@ -375,14 +392,26 @@ function setupLinuxMicProcessing(micStream) {
     audioProcessor = micProcessor;
 }
 
-function setupSystemAudioProcessing(systemStream) {
-    const systemAudioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
+function setupSystemAudioProcessing(systemStream, existingContext = null) {
+    // Reuse the existing mic AudioContext if provided — avoids a second context
+    // that Chromium may leave in "suspended" state (no user-gesture for autoplay).
+    const systemAudioContext = existingContext || new AudioContext({ sampleRate: SAMPLE_RATE });
+
+    // Ensure the context is running (may be suspended if created without user gesture)
+    if (systemAudioContext.state === 'suspended') {
+        systemAudioContext.resume().then(() => {
+            console.log('[SysCapture] AudioContext resumed, state:', systemAudioContext.state);
+        });
+    }
+    console.log('[SysCapture] AudioContext state:', systemAudioContext.state, 'sampleRate:', systemAudioContext.sampleRate);
+
     const systemSource = systemAudioContext.createMediaStreamSource(systemStream);
     const systemProcessor = systemAudioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
 
     let audioBuffer = [];
     const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
+    let _sysDiagCount = 0;
     systemProcessor.onaudioprocess = async e => {
         const inputData = e.inputBuffer.getChannelData(0);
         if (!inputData || inputData.length === 0) return;
@@ -391,7 +420,30 @@ function setupSystemAudioProcessing(systemStream) {
 
         while (audioBuffer.length >= samplesPerChunk) {
             const chunk = audioBuffer.splice(0, samplesPerChunk);
-            const pcmData16 = convertFloat32ToInt16(chunk);
+
+            // ── Gain boost for system audio ──
+            const GAIN = 4.0;
+            const boosted = new Float32Array(chunk.length);
+            for (let i = 0; i < chunk.length; i++) {
+                boosted[i] = Math.max(-1, Math.min(1, chunk[i] * GAIN));
+            }
+
+            // ── Diagnostic RMS ──
+            _sysDiagCount++;
+            {
+                let sumSq = 0;
+                for (let i = 0; i < boosted.length; i++) sumSq += boosted[i] * boosted[i];
+                const rms = Math.sqrt(sumSq / boosted.length);
+                if (_sysDiagCount <= 10 || rms > 0.01) {
+                    console.log(`[SysRMS] chunk #${_sysDiagCount} rms=${rms.toFixed(6)} max=${Math.max(...boosted).toFixed(4)}`);
+                }
+                // First 3 chunks: also log to terminal via IPC
+                if (_sysDiagCount <= 3) {
+                    window.api.listenCapture.log(`[SysRMS] chunk #${_sysDiagCount} rms=${rms.toFixed(6)} max=${Math.max(...boosted).toFixed(4)}`);
+                }
+            }
+
+            const pcmData16 = convertFloat32ToInt16(boosted);
             const base64Data = arrayBufferToBase64(pcmData16.buffer);
 
             try {
@@ -543,6 +595,7 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
             }
 
             // 2. Get system audio using native Electron loopback
+            window.api.listenCapture.log('[SysCapture] Attempting getDisplayMedia loopback...');
             try {
                 mediaStream = await navigator.mediaDevices.getDisplayMedia({
                     video: true,
@@ -551,15 +604,25 @@ async function startCapture(screenshotIntervalSeconds = 5, imageQuality = 'mediu
                 
                 // Verify we got audio tracks
                 const audioTracks = mediaStream.getAudioTracks();
+                const videoTracks = mediaStream.getVideoTracks();
+                const trackInfo = `audio=${audioTracks.length} video=${videoTracks.length}` +
+                    (audioTracks.length > 0 ? ' | ' + audioTracks.map(t => t.label + ' enabled=' + t.enabled + ' muted=' + t.muted).join(', ') : '');
+                window.api.listenCapture.log(`[SysCapture] getDisplayMedia OK: ${trackInfo}`);
+                console.log('[SysAudio] Audio tracks:', audioTracks.length, trackInfo);
+
                 if (audioTracks.length === 0) {
                     throw new Error('No audio track in native loopback stream');
                 }
                 
                 console.log('Windows native loopback audio capture started');
-                const { context, processor } = setupSystemAudioProcessing(mediaStream);
+                // Pass the existing mic AudioContext so we don't create a suspended second context
+                const { context, processor } = setupSystemAudioProcessing(mediaStream, audioContext);
                 systemAudioContext = context;
                 systemAudioProcessor = processor;
+                window.api.listenCapture.log('[SysCapture] setupSystemAudioProcessing started OK');
             } catch (sysAudioErr) {
+                const errMsg = sysAudioErr && sysAudioErr.message ? sysAudioErr.message : String(sysAudioErr);
+                window.api.listenCapture.log(`[SysCapture] FAILED: ${errMsg}`);
                 console.error('Failed to start Windows native loopback audio:', sysAudioErr);
                 // Continue without system audio
             }
@@ -587,10 +650,10 @@ function stopCapture() {
         systemAudioProcessor.disconnect();
         systemAudioProcessor = null;
     }
-    if (systemAudioContext) {
+    if (systemAudioContext && systemAudioContext !== audioContext) {
         systemAudioContext.close();
-        systemAudioContext = null;
     }
+    systemAudioContext = null;
 
     // Stop and release media stream tracks
     if (mediaStream) {
