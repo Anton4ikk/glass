@@ -67,14 +67,16 @@ class ListenService {
                     if (listenWindow && !listenWindow.isDestroyed()) {
                         listenWindow.webContents.send('session-state-changed', { isActive: true });
                     }
+                    internalBridge.emit('listen:sessionStateChanged', { isActive: true });
                     break;
-        
+
                 case 'Stop':
                     console.log('[ListenService] changeSession to "Stop"');
                     await this.closeSession();
                     if (listenWindow && !listenWindow.isDestroyed()) {
                         listenWindow.webContents.send('session-state-changed', { isActive: false });
                     }
+                    internalBridge.emit('listen:sessionStateChanged', { isActive: false });
                     break;
         
                 case 'Done':
@@ -154,11 +156,25 @@ class ListenService {
         }
     }
 
-    async initializeSession(language = 'en') {
+    async initializeSession(language) {
         if (this.isInitializingSession) {
             console.log('Session initialization already in progress.');
             return false;
         }
+
+        // Callers normally pass nothing, so the user's saved choice - not a
+        // hardcoded 'en' - decides what the STT engine transcribes as.
+        // Lazy-required: settingsService pulls in the window manager.
+        if (!language) {
+            try {
+                const settingsService = require('../settings/settingsService');
+                language = await settingsService.getSttLanguageSetting();
+            } catch (error) {
+                console.warn('[ListenService] Could not read STT language setting, falling back to "en":', error.message);
+                language = 'en';
+            }
+        }
+        console.log(`[ListenService] Initializing session with STT language: ${language}`);
 
         this.isInitializingSession = true;
         this.sendToRenderer('session-initializing', true);

@@ -383,6 +383,34 @@ export class SettingsView extends LitElement {
             flex-direction: column;
             gap: 4px;
         }
+        /* Two options only, so a segmented toggle beats a dropdown. */
+        .lang-toggle-options {
+            display: flex;
+            padding: 2px;
+            gap: 2px;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 4px;
+        }
+        .lang-toggle-option {
+            flex: 1;
+            padding: 5px 8px;
+            background: transparent;
+            border: none;
+            border-radius: 3px;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 11px;
+            font-family: inherit;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .lang-toggle-option:hover:not([data-selected='true']) {
+            background: rgba(255, 255, 255, 0.1);
+        }
+        .lang-toggle-option[data-selected='true'] {
+            background: rgba(0, 122, 255, 0.55);
+            color: white;
+        }
         label {
             font-size: 11px;
             font-weight: 500;
@@ -505,6 +533,7 @@ export class SettingsView extends LitElement {
         installingModels: { type: Object, state: true },
         // Whisper related properties
         whisperModels: { type: Array, state: true },
+        sttLanguage: { type: String, state: true },
     };
     //////// after_modelStateService ////////
 
@@ -533,6 +562,7 @@ export class SettingsView extends LitElement {
         this.installingModels = {}; // { modelName: progress }
         // Whisper related
         this.whisperModels = [];
+        this.sttLanguage = 'en';
         this.whisperProgressTracker = null; // Will be initialized when needed
         this.handleUsePicklesKey = this.handleUsePicklesKey.bind(this)
         this.autoUpdateEnabled = true;
@@ -613,13 +643,16 @@ export class SettingsView extends LitElement {
         this.isLoading = true;
         try {
             // Load essential data first
-            const [userState, modelSettings, presets, contentProtection, shortcuts] = await Promise.all([
+            const [userState, modelSettings, presets, contentProtection, shortcuts, sttLanguage] = await Promise.all([
                 window.api.settingsView.getCurrentUser(),
                 window.api.settingsView.getModelSettings(), // Facade call
                 window.api.settingsView.getPresets(),
                 window.api.settingsView.getContentProtectionStatus(),
-                window.api.settingsView.getCurrentShortcuts()
+                window.api.settingsView.getCurrentShortcuts(),
+                window.api.settingsView.getSttLanguage()
             ]);
+
+            if (sttLanguage) this.sttLanguage = sttLanguage;
             
             if (userState && userState.isLoggedIn) this.firebaseUser = userState;
             
@@ -749,6 +782,25 @@ export class SettingsView extends LitElement {
         this.requestUpdate();
     }
     
+    async selectSttLanguage(language) {
+        if (language === this.sttLanguage) return;
+
+        const previous = this.sttLanguage;
+        this.sttLanguage = language; // Optimistic: the toggle should feel instant
+        this.requestUpdate();
+
+        try {
+            const result = await window.api.settingsView.setSttLanguage(language);
+            if (result && result.success === false) {
+                throw new Error(result.error || 'Failed to save language');
+            }
+        } catch (error) {
+            console.error('Failed to save STT language:', error);
+            this.sttLanguage = previous; // Do not show a choice that was not stored
+            this.requestUpdate();
+        }
+    }
+
     async selectModel(type, modelId) {
         // Check if this is an Ollama model that needs to be installed
         const provider = this.getProviderForModel(type, modelId);
@@ -1343,6 +1395,24 @@ export class SettingsView extends LitElement {
                             })}
                         </div>
                     ` : ''}
+                </div>
+                <div class="model-select-group">
+                    <label>Speech Language</label>
+                    <div class="lang-toggle-options">
+                        ${[
+                            { id: 'ru', label: 'Russian' },
+                            { id: 'en', label: 'English' },
+                        ].map(lang => html`
+                            <button
+                                class="lang-toggle-option"
+                                data-selected=${this.sttLanguage === lang.id ? 'true' : 'false'}
+                                @click=${() => this.selectSttLanguage(lang.id)}
+                                ?disabled=${this.saving}
+                            >
+                                ${lang.label}
+                            </button>
+                        `)}
+                    </div>
                 </div>
             </div>
         `;

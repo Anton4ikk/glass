@@ -14,6 +14,7 @@ export class AskView extends LitElement {
         headerText: { type: String },
         headerAnimating: { type: Boolean },
         isStreaming: { type: Boolean },
+        errorMessage: { type: String },
     };
 
     static styles = css`
@@ -709,6 +710,32 @@ export class AskView extends LitElement {
         .header-clear-btn:hover .icon-box {
             background-color: rgba(255,255,255,0.18);
         }
+
+        /* Shown when the request never produced a response. Without this the
+           window silently collapses back to the input and the user has no way
+           to tell a failure apart from an ignored keypress. */
+        .error-message {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            margin: 8px 12px;
+            padding: 10px 12px;
+            border: 1px solid rgba(255, 118, 108, 0.35);
+            border-radius: 8px;
+            background: rgba(255, 118, 108, 0.12);
+            color: rgba(255, 190, 185, 0.95);
+            font-size: 12px;
+            line-height: 1.45;
+            word-break: break-word;
+        }
+        .error-message.hidden {
+            display: none;
+        }
+        .error-message .error-icon {
+            flex-shrink: 0;
+            font-size: 13px;
+            line-height: 1.45;
+        }
     `;
 
     constructor() {
@@ -721,6 +748,7 @@ export class AskView extends LitElement {
         this.headerText = 'AI Response';
         this.headerAnimating = false;
         this.isStreaming = false;
+        this.errorMessage = '';
 
         this.marked = null;
         this.hljs = null;
@@ -786,12 +814,22 @@ export class AskView extends LitElement {
 
             window.api.askView.onScrollResponseUp(() => this.handleScroll('up'));
             window.api.askView.onScrollResponseDown(() => this.handleScroll('down'));
+            window.api.askView.onAskStreamError((event, payload) => {
+                const message = typeof payload === 'string' ? payload : payload?.error;
+                console.error('AskView: stream error:', message);
+                this.errorMessage = message || 'Unknown error occurred';
+            });
+
             window.api.askView.onAskStateUpdate((event, newState) => {
+                // A new request is starting - drop the previous failure so the
+                // banner never outlives the question it belongs to.
+                if (newState.isLoading) this.errorMessage = '';
+
                 this.currentResponse = newState.currentResponse;
                 this.currentQuestion = newState.currentQuestion;
                 this.isLoading       = newState.isLoading;
                 this.isStreaming     = newState.isStreaming;
-              
+
                 const wasHidden = !this.showTextInput;
                 this.showTextInput = newState.showTextInput;
               
@@ -920,6 +958,7 @@ export class AskView extends LitElement {
         this.isStreaming = false;
         this.headerText = 'AI Response';
         this.showTextInput = true;
+        this.errorMessage = '';
         this.lastProcessedLength = 0;
         this.smdParser = null;
         this.smdContainer = null;
@@ -1306,7 +1345,7 @@ export class AskView extends LitElement {
             this.renderContent();
         }
     
-        if (changedProperties.has('showTextInput') || changedProperties.has('isLoading') || changedProperties.has('currentResponse')) {
+        if (changedProperties.has('showTextInput') || changedProperties.has('isLoading') || changedProperties.has('currentResponse') || changedProperties.has('errorMessage')) {
             this.adjustWindowHeightThrottled();
         }
     
@@ -1380,6 +1419,12 @@ export class AskView extends LitElement {
                     <!-- Content is dynamically generated in updateResponseContent() -->
                 </div>
 
+                <!-- Error Banner -->
+                <div class="error-message ${!this.errorMessage ? 'hidden' : ''}">
+                    <span class="error-icon">⚠️</span>
+                    <span>${this.errorMessage}</span>
+                </div>
+
                 <!-- Text Input Container -->
                 <div class="text-input-container ${!hasResponse ? 'no-response' : ''} ${!this.showTextInput ? 'hidden' : ''}">
                     <input
@@ -1411,14 +1456,17 @@ export class AskView extends LitElement {
             const headerEl = this.shadowRoot.querySelector('.response-header');
             const responseEl = this.shadowRoot.querySelector('.response-container');
             const inputEl = this.shadowRoot.querySelector('.text-input-container');
+            const errorEl = this.shadowRoot.querySelector('.error-message');
 
             if (!headerEl || !responseEl) return;
 
             const headerHeight = headerEl.classList.contains('hidden') ? 0 : headerEl.offsetHeight;
             const responseHeight = responseEl.scrollHeight;
             const inputHeight = (inputEl && !inputEl.classList.contains('hidden')) ? inputEl.offsetHeight : 0;
+            // Margins are outside offsetHeight, so add them or the banner clips.
+            const errorHeight = (errorEl && !errorEl.classList.contains('hidden')) ? errorEl.offsetHeight + 16 : 0;
 
-            const idealHeight = headerHeight + responseHeight + inputHeight;
+            const idealHeight = headerHeight + responseHeight + inputHeight + errorHeight;
 
             const targetHeight = Math.min(700, idealHeight);
 

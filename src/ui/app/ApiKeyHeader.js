@@ -19,6 +19,9 @@ export class ApiKeyHeader extends LitElement {
         installingModel: { type: String, state: true },
         installProgress: { type: Number, state: true },
         whisperInstallingModels: { type: Object, state: true },
+        whisperModels: { type: Array, state: true },
+        isSttModelDropdownOpen: { type: Boolean, state: true },
+        sttLanguage: { type: String, state: true },
         backCallback: { type: Function },
         llmError: { type: String },
         sttError: { type: String },
@@ -321,6 +324,131 @@ export class ApiKeyHeader extends LitElement {
             word-wrap: break-word;
             width: 240px;
         }
+        /* Native <select> popups do not render in a transparent frameless window
+           on macOS, so the model picker is drawn in-page instead. */
+        .model-dropdown {
+            position: relative;
+            display: inline-block;
+            -webkit-app-region: no-drag;
+        }
+        .model-dropdown-trigger {
+            -webkit-app-region: no-drag;
+            width: 240px;
+            padding: 10px 8px;
+            background: rgba(61.2, 61.2, 61.2, 0.8);
+            border-radius: 6px;
+            border: 1px solid rgba(255, 255, 255, 0.24);
+            color: white;
+            font-size: 11px;
+            font-family: inherit;
+            text-align: left;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .model-dropdown-trigger.invalid {
+            outline: 1px solid #ff7070;
+            outline-offset: -1px;
+        }
+        .model-dropdown-trigger .placeholder {
+            color: rgba(255, 255, 255, 0.5);
+        }
+        .model-dropdown-caret {
+            flex-shrink: 0;
+            font-size: 8px;
+            opacity: 0.6;
+        }
+        /* Opens upward: the api-key window is a fixed 456x400 and the model row
+           sits near its bottom edge. */
+        .model-dropdown-list {
+            position: absolute;
+            bottom: calc(100% + 4px);
+            left: 0;
+            right: 0;
+            box-sizing: border-box;
+            max-height: 160px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            padding: 4px;
+            background: rgba(40, 40, 40, 0.98);
+            border: 1px solid rgba(255, 255, 255, 0.24);
+            border-radius: 6px;
+            z-index: 20;
+        }
+        .model-dropdown-option {
+            -webkit-app-region: no-drag;
+            width: 100%;
+            box-sizing: border-box;
+            padding: 7px 8px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: white;
+            font-size: 11px;
+            font-family: inherit;
+            text-align: left;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .model-dropdown-option:hover {
+            background: rgba(255, 255, 255, 0.12);
+        }
+        .model-dropdown-option[data-selected='true'] {
+            background: rgba(0, 122, 255, 0.35);
+        }
+        .model-dropdown-status {
+            flex-shrink: 0;
+            font-size: 10px;
+            opacity: 0.75;
+        }
+        /* Two options only, so a segmented toggle beats a dropdown: it needs no
+           overlay, which is what makes pickers fragile in this window. */
+        .lang-toggle {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            margin-top: 6px;
+            -webkit-app-region: no-drag;
+        }
+        .lang-toggle-label {
+            font-size: 10px;
+            color: rgba(255, 255, 255, 0.5);
+        }
+        .lang-toggle-options {
+            display: inline-flex;
+            padding: 2px;
+            gap: 2px;
+            background: rgba(61.2, 61.2, 61.2, 0.8);
+            border: 1px solid rgba(255, 255, 255, 0.24);
+            border-radius: 6px;
+        }
+        .lang-toggle-option {
+            -webkit-app-region: no-drag;
+            min-width: 34px;
+            padding: 4px 8px;
+            background: transparent;
+            border: none;
+            border-radius: 4px;
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 10px;
+            font-family: inherit;
+            font-weight: 500;
+            cursor: pointer;
+        }
+        .lang-toggle-option:hover:not([data-selected='true']) {
+            background: rgba(255, 255, 255, 0.12);
+        }
+        .lang-toggle-option[data-selected='true'] {
+            background: rgba(0, 122, 255, 0.55);
+            color: white;
+        }
     `;
 
 
@@ -345,6 +473,9 @@ export class ApiKeyHeader extends LitElement {
         this.installingModel = null;
         this.installProgress = 0;
         this.whisperInstallingModels = {};
+        this.whisperModels = [];
+        this.isSttModelDropdownOpen = false;
+        this.sttLanguage = 'en';
         this.backCallback = () => {};
         this.llmError = '';
         this.sttError = '';
@@ -455,6 +586,15 @@ export class ApiKeyHeader extends LitElement {
             if (llmProviders.length > 0) this.llmProvider = llmProviders[0].id;
             if (sttProviders.length > 0) this.sttProvider = sttProviders[0].id;
 
+            // Restore what was configured previously. Without this the model
+            // selection always starts empty, which keeps Confirm disabled for
+            // providers that require a model (Whisper, Ollama).
+            await this.restoreSavedSelection(config);
+
+            // Needed by the model picker whether or not Ollama is available
+            await this.loadWhisperModels();
+            await this.loadSttLanguage();
+
             // Ollama 상태 및 모델 제안 로드
             if (ollamaStatus?.success) {
                 this.ollamaStatus = {
@@ -471,6 +611,127 @@ export class ApiKeyHeader extends LitElement {
             this.requestUpdate();
         } catch (error) {
             console.error('[ApiKeyHeader] Failed to load provider config:', error);
+        }
+    }
+
+    /**
+     * Re-apply the provider/model pair that is already stored in provider_settings.
+     * Ollama models are dynamic and never appear in the static provider config,
+     * so an LLM model we cannot place is attributed to Ollama.
+     */
+    async restoreSavedSelection(config) {
+        try {
+            const selected = await window.api?.settingsView?.getSelectedModels?.();
+            if (!selected) return;
+
+            const providerOf = (modelId, listKey) =>
+                Object.keys(config).find(id => !id.includes('-glass') && config[id][listKey]?.some(m => m.id === modelId));
+
+            if (selected.llm) {
+                this.selectedLlmModel = selected.llm;
+                const provider = providerOf(selected.llm, 'llmModels') || 'ollama';
+                if (this.providers.llm.some(p => p.id === provider)) {
+                    this.llmProvider = provider;
+                }
+            }
+
+            if (selected.stt) {
+                this.selectedSttModel = selected.stt;
+                const provider = providerOf(selected.stt, 'sttModels');
+                if (provider && this.providers.stt.some(p => p.id === provider)) {
+                    this.sttProvider = provider;
+                }
+            }
+        } catch (error) {
+            console.warn('[ApiKeyHeader] Could not restore saved selection:', error.message);
+        }
+    }
+
+    async loadWhisperModels() {
+        try {
+            const models = await window.api?.apiKeyHeader?.getInstalledModels?.('whisper');
+            if (Array.isArray(models)) {
+                this.whisperModels = models;
+            }
+        } catch (error) {
+            console.warn('[ApiKeyHeader] Could not load Whisper models:', error.message);
+        }
+    }
+
+    async loadSttLanguage() {
+        try {
+            const language = await window.api?.apiKeyHeader?.getSttLanguage?.();
+            if (language) {
+                this.sttLanguage = language;
+            }
+        } catch (error) {
+            console.warn('[ApiKeyHeader] Could not load STT language:', error.message);
+        }
+    }
+
+    async selectSttLanguage(language) {
+        if (language === this.sttLanguage) return;
+
+        const previous = this.sttLanguage;
+        this.sttLanguage = language; // Optimistic: the toggle should feel instant
+        this.requestUpdate();
+
+        try {
+            const result = await window.api?.apiKeyHeader?.setSttLanguage?.(language);
+            if (result && result.success === false) {
+                throw new Error(result.error || 'Failed to save language');
+            }
+        } catch (error) {
+            console.error('[ApiKeyHeader] Could not save STT language:', error.message);
+            this.sttLanguage = previous; // Do not show a choice that was not stored
+            this.requestUpdate();
+        }
+    }
+
+    /**
+     * Whisper models with their install state, falling back to the known catalog
+     * when the service has not reported yet.
+     */
+    _getWhisperModelOptions() {
+        const fallback = [
+            { id: 'whisper-tiny', name: 'Tiny', size: '39M' },
+            { id: 'whisper-base', name: 'Base', size: '74M' },
+            { id: 'whisper-small', name: 'Small', size: '244M' },
+            { id: 'whisper-medium', name: 'Medium', size: '769M' },
+        ];
+        const source = this.whisperModels.length > 0 ? this.whisperModels : fallback;
+
+        return source.map(model => {
+            const progress = this.whisperInstallingModels[model.id];
+            return {
+                id: model.id,
+                label: `Whisper ${model.name}${model.size ? ` (${model.size})` : ''}`,
+                status: progress !== undefined ? `${progress}%` : model.installed ? '✓ Installed' : '↓ Download',
+            };
+        });
+    }
+
+    toggleSttModelDropdown() {
+        this.isSttModelDropdownOpen = !this.isSttModelDropdownOpen;
+        this.requestUpdate();
+    }
+
+    async selectSttModel(modelId) {
+        this.isSttModelDropdownOpen = false;
+        this.sttError = '';
+        this.selectedSttModel = modelId;
+        this.requestUpdate();
+
+        if (!modelId || this.sttProvider !== 'whisper') return;
+
+        // Only fetch what is missing - re-downloading an installed model is wasteful
+        const model = this.whisperModels.find(m => m.id === modelId);
+        const isInstalling = this.whisperInstallingModels[modelId] !== undefined;
+        if (!model?.installed && !isInstalling) {
+            console.log(`[ApiKeyHeader] Auto-installing Whisper model: ${modelId}`);
+            await this.downloadWhisperModel(modelId);
+            await this.loadWhisperModels();
+            this.requestUpdate();
         }
     }
 
@@ -798,6 +1059,7 @@ export class ApiKeyHeader extends LitElement {
         this.sttProvider = newProvider;
         this.errorMessage = '';
         this.successMessage = '';
+        this.isSttModelDropdownOpen = false;
 
         if (this.sttProvider === 'ollama') {
             console.warn('[ApiKeyHeader] Ollama does not support STT yet. Please select Whisper or another provider.');
@@ -1935,6 +2197,9 @@ export class ApiKeyHeader extends LitElement {
 
         const llmProviderName = this.providers.llm.find(p => p.id === this.llmProvider)?.name || this.llmProvider;
 
+        const whisperModelOptions = this._getWhisperModelOptions();
+        const selectedWhisperModel = whisperModelOptions.find(m => m.id === this.selectedSttModel) || null;
+
         return html`
             <div class="container">
                 <button class="close-button" @click=${this.handleClose}>×</button>
@@ -2016,23 +2281,56 @@ export class ApiKeyHeader extends LitElement {
                             : this.sttProvider === 'whisper'
                               ? html`
                                     <div class="input-wrapper">
-                                        <select
-                                            class="api-input ${this.sttError ? 'invalid' : ''}"
-                                            .value=${this.selectedSttModel || ''}
-                                            @change=${e => {
-                                                this.handleSttModelChange(e);
-                                                this.sttError = '';
-                                            }}
-                                            ?disabled=${this.isLoading}
-                                        >
-                                            <option value="">Select a model...</option>
-                                            ${[
-                                                { id: 'whisper-tiny', name: 'Whisper Tiny (39M)' },
-                                                { id: 'whisper-base', name: 'Whisper Base (74M)' },
-                                                { id: 'whisper-small', name: 'Whisper Small (244M)' },
-                                                { id: 'whisper-medium', name: 'Whisper Medium (769M)' },
-                                            ].map(model => html` <option value="${model.id}">${model.name}</option> `)}
-                                        </select>
+                                        <div class="model-dropdown">
+                                            <button
+                                                class="model-dropdown-trigger ${this.sttError ? 'invalid' : ''}"
+                                                @click=${() => this.toggleSttModelDropdown()}
+                                                ?disabled=${this.isLoading}
+                                            >
+                                                ${selectedWhisperModel
+                                                    ? html`<span>${selectedWhisperModel.label}</span>`
+                                                    : html`<span class="placeholder">Select a model...</span>`}
+                                                <span class="model-dropdown-caret">${this.isSttModelDropdownOpen ? '▲' : '▼'}</span>
+                                            </button>
+                                            ${this.isSttModelDropdownOpen
+                                                ? html`
+                                                      <div class="model-dropdown-list">
+                                                          ${whisperModelOptions.map(
+                                                              model => html`
+                                                                  <button
+                                                                      class="model-dropdown-option"
+                                                                      data-selected=${this.selectedSttModel === model.id ? 'true' : 'false'}
+                                                                      @click=${() => this.selectSttModel(model.id)}
+                                                                  >
+                                                                      <span>${model.label}</span>
+                                                                      <span class="model-dropdown-status">${model.status}</span>
+                                                                  </button>
+                                                              `
+                                                          )}
+                                                      </div>
+                                                  `
+                                                : ''}
+                                        </div>
+                                        <div class="lang-toggle">
+                                            <span class="lang-toggle-label">Language</span>
+                                            <div class="lang-toggle-options">
+                                                ${[
+                                                    { id: 'ru', label: 'RU' },
+                                                    { id: 'en', label: 'EN' },
+                                                ].map(
+                                                    lang => html`
+                                                        <button
+                                                            class="lang-toggle-option"
+                                                            data-selected=${this.sttLanguage === lang.id ? 'true' : 'false'}
+                                                            @click=${() => this.selectSttLanguage(lang.id)}
+                                                            ?disabled=${this.isLoading}
+                                                        >
+                                                            ${lang.label}
+                                                        </button>
+                                                    `
+                                                )}
+                                            </div>
+                                        </div>
                                         ${this.sttError ? html`<div class="inline-error-message">${this.sttError}</div>` : ''}
                                     </div>
                                 `

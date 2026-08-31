@@ -901,6 +901,20 @@ class OllamaService extends EventEmitter {
                         console.warn(`[OllamaService] Failed to update DB for model ${model.name}:`, dbError);
                     }
                 }
+
+                // Forget models that Ollama no longer has. Guarded by the
+                // models.length > 0 above on purpose: getInstalledModels()
+                // returns [] for a failed request just as it does for an empty
+                // library, so pruning on an empty list would wipe the table
+                // every time Ollama is briefly unreachable.
+                try {
+                    const pruned = ollamaModelRepository.pruneMissingModels(models.map(m => m.name));
+                    if (pruned.changes > 0) {
+                        console.log(`[OllamaService] Removed ${pruned.changes} stale model row(s) from DB`);
+                    }
+                } catch (dbError) {
+                    console.warn('[OllamaService] Failed to prune stale models from DB:', dbError);
+                }
             }
             
             // UI 알림 (상태 변경 시만)

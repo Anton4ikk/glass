@@ -135,6 +135,51 @@ function setAutoUpdate(uid, isEnabled) {
     }
 }
 
+// Language forced on the STT engine. Whisper's 'auto' detection is unreliable
+// on the short chunks Glass feeds it and drifts to English mid-conversation,
+// so the language is an explicit user choice rather than a guess.
+const SUPPORTED_STT_LANGUAGES = ['en', 'ru'];
+const DEFAULT_STT_LANGUAGE = 'en';
+
+function normalizeSttLanguage(language) {
+    return SUPPORTED_STT_LANGUAGES.includes(language) ? language : DEFAULT_STT_LANGUAGE;
+}
+
+function getSttLanguage(uid) {
+    const db = sqliteClient.getDb();
+    const targetUid = uid || sqliteClient.defaultUserId;
+
+    try {
+        const row = db.prepare('SELECT stt_language FROM users WHERE uid = ?').get(targetUid);
+        return normalizeSttLanguage(row?.stt_language);
+    } catch (error) {
+        console.error('SQLite: Error getting stt_language setting:', error);
+        return DEFAULT_STT_LANGUAGE;
+    }
+}
+
+function setSttLanguage(uid, language) {
+    const db = sqliteClient.getDb();
+    const targetUid = uid || sqliteClient.defaultUserId;
+    const safeLanguage = normalizeSttLanguage(language);
+
+    try {
+        const result = db.prepare('UPDATE users SET stt_language = ? WHERE uid = ?').run(safeLanguage, targetUid);
+
+        // If no rows were updated, the user might not exist, so create them
+        if (result.changes === 0) {
+            const now = Math.floor(Date.now() / 1000);
+            const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, stt_language) VALUES (?, ?, ?, ?, ?)');
+            stmt.run(targetUid, 'User', 'user@example.com', now, safeLanguage);
+        }
+
+        return { success: true, language: safeLanguage };
+    } catch (error) {
+        console.error('SQLite: Error setting stt_language:', error);
+        throw error;
+    }
+}
+
 module.exports = {
     getPresets,
     getPresetTemplates,
@@ -142,5 +187,9 @@ module.exports = {
     updatePreset,
     deletePreset,
     getAutoUpdate,
-    setAutoUpdate
+    setAutoUpdate,
+    getSttLanguage,
+    setSttLanguage,
+    SUPPORTED_STT_LANGUAGES,
+    DEFAULT_STT_LANGUAGE
 };

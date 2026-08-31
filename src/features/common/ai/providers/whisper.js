@@ -14,10 +14,11 @@ if (typeof window === 'undefined') {
 }
 
 class WhisperSTTSession extends EventEmitter {
-    constructor(model, whisperService, sessionId) {
+    constructor(model, whisperService, sessionId, language = 'auto') {
         super();
         this.model = model;
         this.whisperService = whisperService;
+        this.language = language || 'auto';
         this.sessionId = sessionId || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         this.process = null;
         this.isRunning = false;
@@ -77,9 +78,13 @@ class WhisperSTTSession extends EventEmitter {
                 '--no-timestamps',
                 '--output-txt',
                 '--output-json',
-                '--language', 'auto',
-                '--threads', '4',
-                '--print-progress', 'false'
+                '--language', this.language,
+                '--threads', '4'
+                // No --print-progress: it is a valueless toggle in whisper-cli,
+                // so the 'false' that used to follow it was parsed as a second
+                // input file ("error: input file not found 'false'") and could
+                // make the run exit non-zero, discarding a good transcription.
+                // Progress printing is off by default anyway.
             ]);
 
             let output = '';
@@ -196,11 +201,15 @@ class WhisperProvider {
         
         const model = config.model || 'whisper-tiny';
         const sessionType = config.sessionType || 'unknown';
-        console.log(`[WhisperProvider] Creating ${sessionType} STT session with model: ${model}`);
-        
+        // Falls back to 'auto' only when nothing was configured; the user's
+        // explicit choice beats whisper's own detection, which is unreliable
+        // on chunks this short.
+        const language = config.language || 'auto';
+        console.log(`[WhisperProvider] Creating ${sessionType} STT session with model: ${model}, language: ${language}`);
+
         // Create unique session ID based on type
         const sessionId = `${sessionType}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
-        const session = new WhisperSTTSession(model, this.whisperService, sessionId);
+        const session = new WhisperSTTSession(model, this.whisperService, sessionId, language);
         
         // Log session creation
         console.log(`[WhisperProvider] Created session: ${sessionId}`);

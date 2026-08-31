@@ -55,13 +55,20 @@ function upsertModel({ name, size, installed = false, installing = false }) {
 
 /**
  * Update installation status for a model
+ * Upserts, since models are discovered dynamically from Ollama and may not have a row yet
  */
 function updateInstallStatus(name, installed, installing = false) {
     const db = sqliteClient.getDb();
-    const query = 'UPDATE ollama_models SET installed = ?, installing = ? WHERE name = ?';
-    
+    const query = `
+        INSERT INTO ollama_models (name, size, installed, installing)
+        VALUES (?, 'Unknown', ?, ?)
+        ON CONFLICT(name) DO UPDATE SET
+            installed = excluded.installed,
+            installing = excluded.installing
+    `;
+
     try {
-        const result = db.prepare(query).run(installed ? 1 : 0, installing ? 1 : 0, name);
+        const result = db.prepare(query).run(name, installed ? 1 : 0, installing ? 1 : 0);
         return { success: true, changes: result.changes };
     } catch (err) {
         console.error('[OllamaModel Repository] Failed to update install status:', err);
@@ -111,6 +118,39 @@ function getInstalledModels() {
 }
 
 /**
+ * Drop rows for models Ollama no longer reports.
+ *
+ * The sync loop only ever upserts models that are present, so a model removed
+ * with `ollama rm` would otherwise stay here forever and keep counting towards
+ * "is this provider configured?".
+ *
+ * Rows with installing = 1 are kept: a model still being pulled is legitimately
+ * absent from Ollama's list and must not be dropped mid-download.
+ *
+ * Callers must not pass an empty list to mean "nothing installed" - see the
+ * guard in ollamaService, where an empty list is indistinguishable from a
+ * failed request.
+ */
+function pruneMissingModels(liveModelNames) {
+    const db = sqliteClient.getDb();
+
+    if (!Array.isArray(liveModelNames) || liveModelNames.length === 0) {
+        return { success: true, changes: 0 };
+    }
+
+    const placeholders = liveModelNames.map(() => '?').join(', ');
+    const query = `DELETE FROM ollama_models WHERE installing = 0 AND name NOT IN (${placeholders})`;
+
+    try {
+        const result = db.prepare(query).run(...liveModelNames);
+        return { success: true, changes: result.changes };
+    } catch (err) {
+        console.error('[OllamaModel Repository] Failed to prune missing models:', err);
+        throw err;
+    }
+}
+
+/**
  * Get models currently being installed
  */
 function getInstallingModels() {
@@ -133,5 +173,6 @@ module.exports = {
     initializeDefaultModels,
     deleteModel,
     getInstalledModels,
-    getInstallingModels
-}; 
+    getInstallingModels,
+    pruneMissingModels
+};

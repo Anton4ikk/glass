@@ -795,6 +795,7 @@ module.exports = {
     windowPool,
     toggleContentProtection,
     resizeHeaderWindow,
+    setContentProtection,
     getContentProtectionStatus,
     showSettingsWindow,
     hideSettingsWindow,

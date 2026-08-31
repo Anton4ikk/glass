@@ -137,6 +137,43 @@ async function setAutoUpdate(uid, isEnabled) {
 
 
 
+const SUPPORTED_STT_LANGUAGES = ['en', 'ru'];
+const DEFAULT_STT_LANGUAGE = 'en';
+
+function normalizeSttLanguage(language) {
+    return SUPPORTED_STT_LANGUAGES.includes(language) ? language : DEFAULT_STT_LANGUAGE;
+}
+
+async function getSttLanguage(uid) {
+    const userDocRef = doc(getFirestoreInstance(), 'users', uid);
+    try {
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists()) {
+            return normalizeSttLanguage(userSnap.data().stt_language);
+        }
+        return DEFAULT_STT_LANGUAGE;
+    } catch (error) {
+        console.error('Firebase: Error getting stt_language setting:', error);
+        return DEFAULT_STT_LANGUAGE;
+    }
+}
+
+async function setSttLanguage(uid, language) {
+    const userDocRef = doc(getFirestoreInstance(), 'users', uid);
+    const safeLanguage = normalizeSttLanguage(language);
+    try {
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists()) {
+            await updateDoc(userDocRef, { stt_language: safeLanguage });
+        }
+        // If user doc does not exist, do nothing (no creation)
+        return { success: true, language: safeLanguage };
+    } catch (error) {
+        console.error('Firebase: Error setting stt_language:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 module.exports = {
     getPresets,
     getPresetTemplates,
@@ -145,4 +182,6 @@ module.exports = {
     deletePreset,
     getAutoUpdate,
     setAutoUpdate,
-}; 
+    getSttLanguage,
+    setSttLanguage,
+};

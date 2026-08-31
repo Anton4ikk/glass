@@ -121,6 +121,13 @@ class ShortcutsService {
     }
 
     async toggleAllWindowsVisibility() {
+        // Re-sync with the real window state - visibility can also be changed
+        // from outside this service (e.g. the tray menu).
+        const header = this.windowPool?.get('header');
+        if (header && !header.isDestroyed()) {
+            this.allWindowVisibility = header.isVisible();
+        }
+
         const targetVisibility = !this.allWindowVisibility;
         internalBridge.emit('window:requestToggleAllWindowsVisibility', {
             targetVisibility: targetVisibility

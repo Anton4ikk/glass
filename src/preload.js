@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld('api', {
     validateKey: (data) => ipcRenderer.invoke('model:validate-key', data),
     setSelectedModel: (data) => ipcRenderer.invoke('model:set-selected-model', data),
     areProvidersConfigured: () => ipcRenderer.invoke('model:are-providers-configured'),
+    getSttLanguage: () => ipcRenderer.invoke('settings:get-stt-language'),
+    setSttLanguage: (language) => ipcRenderer.invoke('settings:set-stt-language', language),
     
     // Window Management
     getHeaderPosition: () => ipcRenderer.invoke('get-header-position'),
@@ -212,6 +214,8 @@ contextBridge.exposeInMainWorld('api', {
     getAllKeys: () => ipcRenderer.invoke('model:get-all-keys'),
     getAvailableModels: (type) => ipcRenderer.invoke('model:get-available-models', type),
     getSelectedModels: () => ipcRenderer.invoke('model:get-selected-models'),
+    getSttLanguage: () => ipcRenderer.invoke('settings:get-stt-language'),
+    setSttLanguage: (language) => ipcRenderer.invoke('settings:set-stt-language', language),
     validateKey: (data) => ipcRenderer.invoke('model:validate-key', data),
     saveApiKey: (key) => ipcRenderer.invoke('model:save-api-key', key),
     removeApiKey: (provider) => ipcRenderer.invoke('model:remove-api-key', provider),

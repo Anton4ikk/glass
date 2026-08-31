@@ -71,6 +71,10 @@ mac:
     # Minimum macOS version (supports both Intel and Apple Silicon)
     minimumSystemVersion: '11.0'
     hardenedRuntime: true
+    # Menu bar app: no dock icon / Cmd+Tab entry on launch.
+    # The tray's "Show Icon in Dock" toggle can still bring it back at runtime.
+    extendInfo:
+        LSUIElement: true
     entitlements: entitlements.plist
     entitlementsInherit: entitlements.plist
     target:

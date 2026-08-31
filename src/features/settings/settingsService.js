@@ -420,8 +420,27 @@ async function setAutoUpdateSetting(isEnabled) {
     }
 }
 
+async function getSttLanguageSetting() {
+    try {
+        return await settingsRepository.getSttLanguage();
+    } catch (error) {
+        console.error('[SettingsService] Error getting STT language setting:', error);
+        return 'en'; // Fallback to the schema default
+    }
+}
+
+async function setSttLanguageSetting(language) {
+    try {
+        const result = await settingsRepository.setSttLanguage(language);
+        return { success: true, language: result?.language || language };
+    } catch (error) {
+        console.error('[SettingsService] Error setting STT language setting:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 function initialize() {
-    // cleanup 
+    // cleanup
     windowNotificationManager.cleanup();
     
     console.log('[SettingsService] Initialized and ready.');
@@ -456,6 +475,8 @@ module.exports = {
     updateContentProtection,
     getAutoUpdateSetting,
     setAutoUpdateSetting,
+    getSttLanguageSetting,
+    setSttLanguageSetting,
     // Model settings facade
     getModelSettings,
     clearApiKey,

@@ -28,6 +28,7 @@ const sessionRepository = require('./features/common/repositories/session');
 const modelStateService = require('./features/common/services/modelStateService');
 const featureBridge = require('./bridge/featureBridge');
 const windowBridge = require('./bridge/windowBridge');
+const trayService = require('./features/tray/trayService');
 
 // Global variables
 const eventBridge = new EventEmitter();
@@ -171,6 +172,9 @@ setupProtocolHandling();
 
 app.whenReady().then(async () => {
 
+    // Glass runs from the menu bar - hide the dock icon before any window shows up.
+    trayService.applyDockPreference();
+
     // Setup native loopback audio capture for Windows
     session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
         desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
@@ -221,6 +225,9 @@ app.whenReady().then(async () => {
         
         createWindows();
 
+        // Menu bar / system tray icon
+        trayService.initialize();
+
     } catch (err) {
         console.error('>>> [index.js] Database initialization failed - some features may not work', err);
         // Optionally, show an error dialog to the user
@@ -257,6 +264,9 @@ app.on('before-quit', async (event) => {
     event.preventDefault();
     
     try {
+        // 0. Remove the tray icon so it doesn't linger during shutdown
+        trayService.destroy();
+
         // 1. Stop audio capture first (immediate)
         await listenService.closeSession();
         console.log('[Shutdown] Audio capture stopped');

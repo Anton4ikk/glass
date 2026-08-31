@@ -84,8 +84,11 @@ class PermissionService {
         } catch (captureError) {
           console.log('[Permissions] Screen capture request triggered (expected to fail):', captureError.message);
         }
-        
-        // await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
+
+        // The capture attempt above only lists the app under Screen Recording.
+        // Once the status is 'denied' macOS never prompts again, so the pane has
+        // to be opened explicitly or the button does nothing at all.
+        await shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture');
       }
       return { success: true };
     } catch (error) {
