@@ -193,11 +193,13 @@ class SttService {
                     if (!isNoise && finalText.length > 2) {
                         this.debounceMyCompletion(finalText);
                         
+                        // Shown as a growing partial; the debounced flush sends the
+                        // final turn and replaces it, so each chunk isn't shown twice.
                         this.sendToRenderer('stt-update', {
                             speaker: 'Me',
-                            text: finalText,
-                            isPartial: false,
-                            isFinal: true,
+                            text: this.myCompletionBuffer,
+                            isPartial: true,
+                            isFinal: false,
                             timestamp: Date.now(),
                         });
                     } else {
@@ -335,11 +337,13 @@ class SttService {
                     if (!isNoise && finalText.length > 2) {
                         this.debounceTheirCompletion(finalText);
                         
+                        // Shown as a growing partial; the debounced flush sends the
+                        // final turn and replaces it, so each chunk isn't shown twice.
                         this.sendToRenderer('stt-update', {
                             speaker: 'Them',
-                            text: finalText,
-                            isPartial: false,
-                            isFinal: true,
+                            text: this.theirCompletionBuffer,
+                            isPartial: true,
+                            isFinal: false,
                             timestamp: Date.now(),
                         });
                     } else {

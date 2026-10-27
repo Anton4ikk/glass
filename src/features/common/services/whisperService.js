@@ -520,22 +520,21 @@ class WhisperService extends EventEmitter {
         return this.whisperPath;
     }
 
-    async saveAudioToTemp(audioBuffer, sessionId = '') {
+    async saveAudioToTemp(audioBuffer, sessionId = '', sampleRate = 16000) {
         const timestamp = Date.now();
         const random = Math.random().toString(36).substr(2, 6);
         const sessionPrefix = sessionId ? `${sessionId}_` : '';
         const tempFile = path.join(this.tempDir, `audio_${sessionPrefix}${timestamp}_${random}.wav`);
         
-        const wavHeader = this.createWavHeader(audioBuffer.length);
+        const wavHeader = this.createWavHeader(audioBuffer.length, sampleRate);
         const wavBuffer = Buffer.concat([wavHeader, audioBuffer]);
         
         await fsPromises.writeFile(tempFile, wavBuffer);
         return tempFile;
     }
 
-    createWavHeader(dataSize) {
+    createWavHeader(dataSize, sampleRate = 16000) {
         const header = Buffer.alloc(44);
-        const sampleRate = 16000;
         const numChannels = 1;
         const bitsPerSample = 16;
         

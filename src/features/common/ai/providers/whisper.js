@@ -13,6 +13,58 @@ if (typeof window === 'undefined') {
     EventEmitter = DummyEventEmitter;
 }
 
+// listenCapture.js records PCM16 mono at 24 kHz; the WAV header must say so,
+// otherwise whisper hears the audio slowed down and pitched down by 1.5x.
+const INPUT_SAMPLE_RATE = 24000;
+const BYTES_PER_SECOND = INPUT_SAMPLE_RATE * 2;
+
+// Energy-based segmentation. Whisper hallucinates on silence/music
+// ("[Музыка]", "Редактор субтитров А.Синецкая") and loses words when speech is
+// cut into fixed 1.5 s slices, so audio is sent only as whole utterances.
+const SPEECH_RMS_THRESHOLD = 0.01;      // same level the [MicRMS] diagnostics treat as speech
+const END_OF_SPEECH_SILENCE_MS = 700;   // pause that closes an utterance
+const MAX_UTTERANCE_MS = 12000;         // force a cut during long monologues
+const MIN_SPEECH_MS = 300;              // ignore clicks and short bursts
+const PRE_ROLL_MS = 300;                // keep audio just before speech onset
+
+// Phrases whisper produces from non-speech audio (artifacts of its subtitle
+// training data). Bracketed tags are stripped separately.
+const HALLUCINATION_PATTERNS = [
+    /редактор субтитров/i,
+    /корректор\s+[А-ЯЁ]\.\s?[А-ЯЁ]/,
+    /субтитры (сделал|создавал|подготовил)/i,
+    /продолжение следует/i,
+    /спасибо за просмотр/i,
+    /подписывайтесь на (наш )?канал/i,
+    /thank you for watching/i,
+    /subtitles by/i,
+];
+
+function chunkRms(buffer) {
+    const samples = Math.floor(buffer.length / 2);
+    if (samples === 0) return 0;
+    let sumSq = 0;
+    for (let i = 0; i < samples; i++) {
+        const s = buffer.readInt16LE(i * 2) / 32768;
+        sumSq += s * s;
+    }
+    return Math.sqrt(sumSq / samples);
+}
+
+function cleanTranscription(text) {
+    const cleaned = text
+        .replace(/\[[^\]]*\]/g, ' ')
+        .replace(/\([^)]*\)/g, ' ')
+        .replace(/\*[^*]*\*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned) return '';
+    if (HALLUCINATION_PATTERNS.some(re => re.test(cleaned))) return '';
+    // All-caps lines like "ДИНАМИЧНАЯ МУЗЫКА" are sound captions, not speech.
+    if (/^[^a-zа-яё]*$/.test(cleaned) && /[A-ZА-ЯЁ]{5,}/.test(cleaned)) return '';
+    return cleaned;
+}
+
 class WhisperSTTSession extends EventEmitter {
     constructor(model, whisperService, sessionId, language = 'auto') {
         super();
@@ -25,6 +77,11 @@ class WhisperSTTSession extends EventEmitter {
         this.audioBuffer = Buffer.alloc(0);
         this.processingInterval = null;
         this.lastTranscription = '';
+        // Utterance state, see the segmentation constants above.
+        this.speechStartedAt = 0;
+        this.lastSpeechAt = 0;
+        this.speechMs = 0;
+        this.isProcessing = false;
     }
 
     async initialize() {
@@ -42,25 +99,36 @@ class WhisperSTTSession extends EventEmitter {
 
     startProcessingLoop() {
         this.processingInterval = setInterval(async () => {
-            const minBufferSize = 16000 * 2 * 0.15;
-            if (this.audioBuffer.length >= minBufferSize && !this.process) {
-                console.log(`[WhisperSTT-${this.sessionId}] Processing audio chunk, buffer size: ${this.audioBuffer.length}`);
-                await this.processAudioChunk();
+            if (!this.speechStartedAt || this.isProcessing) return;
+
+            const now = Date.now();
+            const pauseEnded = now - this.lastSpeechAt >= END_OF_SPEECH_SILENCE_MS;
+            const tooLong = now - this.speechStartedAt >= MAX_UTTERANCE_MS;
+            if (!pauseEnded && !tooLong) return;
+
+            const enoughSpeech = this.speechMs >= MIN_SPEECH_MS;
+            const audioData = this.audioBuffer;
+            this.audioBuffer = Buffer.alloc(0);
+            this.speechStartedAt = 0;
+            this.speechMs = 0;
+
+            if (enoughSpeech) {
+                console.log(`[WhisperSTT-${this.sessionId}] Processing utterance, ${(audioData.length / BYTES_PER_SECOND).toFixed(1)}s`);
+                this.isProcessing = true;
+                await this.processAudioChunk(audioData);
             }
-        }, 1500);
+        }, 200);
     }
 
-    async processAudioChunk() {
-        if (!this.isRunning || this.audioBuffer.length === 0) return;
-
-        const audioData = this.audioBuffer;
-        this.audioBuffer = Buffer.alloc(0);
+    async processAudioChunk(audioData) {
+        if (!this.isRunning || audioData.length === 0) return;
 
         try {
-            const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId);
+            const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId, INPUT_SAMPLE_RATE);
             
             if (!tempFile || typeof tempFile !== 'string') {
                 console.error('[WhisperSTT] Invalid temp file path:', tempFile);
+                this.isProcessing = false;
                 return;
             }
             
@@ -69,6 +137,7 @@ class WhisperSTTSession extends EventEmitter {
 
             if (!whisperPath || !modelPath) {
                 console.error('[WhisperSTT] Invalid whisper or model path:', { whisperPath, modelPath });
+                this.isProcessing = false;
                 return;
             }
 
@@ -100,9 +169,10 @@ class WhisperSTTSession extends EventEmitter {
 
             this.process.on('close', async (code) => {
                 this.process = null;
+                this.isProcessing = false;
                 
                 if (code === 0 && output.trim()) {
-                    const transcription = output.trim();
+                    const transcription = cleanTranscription(output);
                     if (transcription && transcription !== this.lastTranscription) {
                         this.lastTranscription = transcription;
                         console.log(`[WhisperSTT-${this.sessionId}] Transcription: "${transcription}"`);
@@ -121,6 +191,7 @@ class WhisperSTTSession extends EventEmitter {
             });
 
         } catch (error) {
+            this.isProcessing = false;
             console.error('[WhisperSTT] Processing error:', error);
             this.emit('error', error);
         }
@@ -152,9 +223,18 @@ class WhisperSTTSession extends EventEmitter {
 
         if (audioData.length > 0) {
             this.audioBuffer = Buffer.concat([this.audioBuffer, audioData]);
-            // Log every 10th audio chunk to avoid spam
-            if (Math.random() < 0.1) {
-                console.log(`[WhisperSTT-${this.sessionId}] Received audio chunk: ${audioData.length} bytes, total buffer: ${this.audioBuffer.length} bytes`);
+
+            if (chunkRms(audioData) >= SPEECH_RMS_THRESHOLD) {
+                const now = Date.now();
+                if (!this.speechStartedAt) this.speechStartedAt = now;
+                this.lastSpeechAt = now;
+                this.speechMs += (audioData.length / BYTES_PER_SECOND) * 1000;
+            } else if (!this.speechStartedAt) {
+                // No speech yet: keep only a short pre-roll instead of the whole silence.
+                const preRollBytes = Math.floor(BYTES_PER_SECOND * PRE_ROLL_MS / 1000) & ~1;
+                if (this.audioBuffer.length > preRollBytes) {
+                    this.audioBuffer = this.audioBuffer.subarray(this.audioBuffer.length - preRollBytes);
+                }
             }
         }
     }
