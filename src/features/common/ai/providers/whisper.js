@@ -26,6 +26,7 @@ const END_OF_SPEECH_SILENCE_MS = 700;   // pause that closes an utterance
 const MAX_UTTERANCE_MS = 12000;         // force a cut during long monologues
 const MIN_SPEECH_MS = 300;              // ignore clicks and short bursts
 const PRE_ROLL_MS = 300;                // keep audio just before speech onset
+const CLOSE_DRAIN_TIMEOUT_MS = 10000;   // total time close() may wait for the last utterances
 
 // Phrases whisper produces from non-speech audio (artifacts of its subtitle
 // training data). Bracketed tags are stripped separately.
@@ -51,12 +52,21 @@ function chunkRms(buffer) {
     return Math.sqrt(sumSq / samples);
 }
 
+// Resolves true if the promise settled within ms, false on timeout.
+function withTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise(resolve => { timer = setTimeout(() => resolve(false), Math.max(0, ms)); });
+    return Promise.race([promise.then(() => true), timeout]).finally(() => clearTimeout(timer));
+}
+
 function cleanTranscription(text) {
     const cleaned = text
         .replace(/\[[^\]]*\]/g, ' ')
         .replace(/\([^)]*\)/g, ' ')
         .replace(/\*[^*]*\*/g, ' ')
         .replace(/\s+/g, ' ')
+        // Decoder loops: "Это не надо. Это не надо. Это не надо." -> "Это не надо."
+        .replace(/(\S.{2,}?)(?:[\s,.!?…-]*\1){2,}/giu, '$1')
         .trim();
     if (!cleaned) return '';
     if (HALLUCINATION_PATTERNS.some(re => re.test(cleaned))) return '';
@@ -82,6 +92,7 @@ class WhisperSTTSession extends EventEmitter {
         this.lastSpeechAt = 0;
         this.speechMs = 0;
         this.isProcessing = false;
+        this.currentRun = null;
     }
 
     async initialize() {
@@ -120,8 +131,17 @@ class WhisperSTTSession extends EventEmitter {
         }, 200);
     }
 
-    async processAudioChunk(audioData) {
-        if (!this.isRunning || audioData.length === 0) return;
+    // Resolves once whisper-cli has exited and the transcription (if any) was emitted.
+    processAudioChunk(audioData) {
+        this.currentRun = this._runWhisper(audioData);
+        return this.currentRun;
+    }
+
+    async _runWhisper(audioData) {
+        if (!this.isRunning || audioData.length === 0) {
+            this.isProcessing = false;
+            return;
+        }
 
         try {
             const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId, INPUT_SAMPLE_RATE);
@@ -138,6 +158,13 @@ class WhisperSTTSession extends EventEmitter {
             if (!whisperPath || !modelPath) {
                 console.error('[WhisperSTT] Invalid whisper or model path:', { whisperPath, modelPath });
                 this.isProcessing = false;
+                return;
+            }
+
+            // close() may have given up waiting while the file was being written.
+            if (!this.isRunning) {
+                this.isProcessing = false;
+                await this.whisperService.cleanupTempFile(tempFile);
                 return;
             }
 
@@ -167,7 +194,12 @@ class WhisperSTTSession extends EventEmitter {
                 errorOutput += data.toString();
             });
 
-            this.process.on('close', async (code) => {
+            // Without a listener a failed spawn would throw from the event emitter.
+            this.process.on('error', (error) => {
+                errorOutput += error.message;
+            });
+
+            await new Promise(resolve => this.process.on('close', async (code) => {
                 this.process = null;
                 this.isProcessing = false;
                 
@@ -183,12 +215,14 @@ class WhisperSTTSession extends EventEmitter {
                             sessionId: this.sessionId
                         });
                     }
-                } else if (errorOutput) {
+                } else if (errorOutput && this.isRunning) {
+                    // Not logged after close(): then the run was killed on purpose.
                     console.error(`[WhisperSTT-${this.sessionId}] Process error:`, errorOutput);
                 }
 
                 await this.whisperService.cleanupTempFile(tempFile);
-            });
+                resolve();
+            }));
 
         } catch (error) {
             this.isProcessing = false;
@@ -241,12 +275,29 @@ class WhisperSTTSession extends EventEmitter {
 
     async close() {
         console.log(`[WhisperSTT-${this.sessionId}] Closing session`);
-        this.isRunning = false;
 
         if (this.processingInterval) {
             clearInterval(this.processingInterval);
             this.processingInterval = null;
         }
+
+        // Finish the utterance in flight and the one still being spoken, so the
+        // last phrase before Stop isn't lost. Listeners are still attached here.
+        // One deadline for both steps keeps Stop from hanging (e.g. on a cold model load).
+        if (this.isRunning) {
+            const deadline = Date.now() + CLOSE_DRAIN_TIMEOUT_MS;
+            const inFlightDone = this.currentRun ? await withTimeout(this.currentRun, deadline - Date.now()) : true;
+            // If the in-flight run timed out, don't start a second whisper next to it.
+            if (inFlightDone && this.speechMs >= MIN_SPEECH_MS && Date.now() < deadline) {
+                const audioData = this.audioBuffer;
+                this.audioBuffer = Buffer.alloc(0);
+                this.speechStartedAt = 0;
+                this.speechMs = 0;
+                this.isProcessing = true;
+                await withTimeout(this.processAudioChunk(audioData), deadline - Date.now());
+            }
+        }
+        this.isRunning = false;
 
         if (this.process) {
             this.process.kill('SIGTERM');

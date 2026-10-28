@@ -77,10 +77,8 @@ class SttService {
         const finalText = (this.myCompletionBuffer + this.myCurrentUtterance).trim();
         if (!this.modelInfo || !finalText) return;
 
-        // Notify completion callback
-        if (this.onTranscriptionComplete) {
-            this.onTranscriptionComplete('Me', finalText);
-        }
+        // Notify completion callback; returned so closeSessions() can wait for the save
+        const saved = this.onTranscriptionComplete ? this.onTranscriptionComplete('Me', finalText) : null;
         
         // Send to renderer as final
         this.sendToRenderer('stt-update', {
@@ -98,16 +96,15 @@ class SttService {
         if (this.onStatusUpdate) {
             this.onStatusUpdate('Listening...');
         }
+        return saved;
     }
 
     flushTheirCompletion() {
         const finalText = (this.theirCompletionBuffer + this.theirCurrentUtterance).trim();
         if (!this.modelInfo || !finalText) return;
         
-        // Notify completion callback
-        if (this.onTranscriptionComplete) {
-            this.onTranscriptionComplete('Them', finalText);
-        }
+        // Notify completion callback; returned so closeSessions() can wait for the save
+        const saved = this.onTranscriptionComplete ? this.onTranscriptionComplete('Them', finalText) : null;
         
         // Send to renderer as final
         this.sendToRenderer('stt-update', {
@@ -125,6 +122,7 @@ class SttService {
         if (this.onStatusUpdate) {
             this.onStatusUpdate('Listening...');
         }
+        return saved;
     }
 
     debounceMyCompletion(text) {
@@ -761,16 +759,8 @@ class SttService {
             this.sessionRenewTimeout = null;
         }
 
-        // Clear timers
-        if (this.myCompletionTimer) {
-            clearTimeout(this.myCompletionTimer);
-            this.myCompletionTimer = null;
-        }
-        if (this.theirCompletionTimer) {
-            clearTimeout(this.theirCompletionTimer);
-            this.theirCompletionTimer = null;
-        }
-
+        // Close first: providers like Whisper still deliver the final utterance
+        // while closing, which lands in the completion buffers below.
         const closePromises = [];
         if (this.mySttSession) {
             closePromises.push(this.mySttSession.close());
@@ -783,6 +773,18 @@ class SttService {
 
         await Promise.all(closePromises);
         console.log('All STT sessions closed.');
+
+        // Flush instead of dropping the turns still waiting for the debounce,
+        // and wait until they are saved so the caller sees the full conversation.
+        if (this.myCompletionTimer) {
+            clearTimeout(this.myCompletionTimer);
+            this.myCompletionTimer = null;
+        }
+        if (this.theirCompletionTimer) {
+            clearTimeout(this.theirCompletionTimer);
+            this.theirCompletionTimer = null;
+        }
+        await Promise.all([this.flushMyCompletion(), this.flushTheirCompletion()]);
 
         // Reset state
         this.myCurrentUtterance = '';

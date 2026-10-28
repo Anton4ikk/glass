@@ -231,6 +231,15 @@ export class SummaryView extends LitElement {
             font-size: 12px;
             font-style: italic;
         }
+
+        .error-state {
+            padding: 6px 8px;
+            margin-bottom: 6px;
+            border-radius: 6px;
+            background: rgba(255, 80, 80, 0.15);
+            color: rgba(255, 180, 180, 0.95);
+            font-size: 11px;
+        }
     `;
 
     static properties = {
@@ -464,8 +473,9 @@ export class SummaryView extends LitElement {
 
         return html`
             <div class="insights-container">
+                ${data.error ? html`<div class="error-state">Insights failed: ${data.error}</div>` : ''}
                 ${!hasAnyContent
-                    ? html`<div class="empty-state">No insights yet...</div>`
+                    ? data.error ? '' : html`<div class="empty-state">No insights yet...</div>`
                     : html`
                         <insights-title>Current Summary</insights-title>
                         ${data.summary.length > 0

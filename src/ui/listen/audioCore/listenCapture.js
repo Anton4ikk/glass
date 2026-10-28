@@ -45,6 +45,8 @@ let systemAudioProcessor = null;
 
 let systemAudioBuffer = [];
 const MAX_SYSTEM_BUFFER_SIZE = 10;
+// System audio arrives every 100 ms; anything older means it has stopped.
+const AEC_REFERENCE_MAX_AGE_MS = 500;
 
 // ---------------------------
 // Utility helpers (exact from renderer.js)
@@ -313,14 +315,14 @@ async function setupMicProcessing(micStream) {
             let chunk = audioBuffer.splice(0, samplesPerChunk);
             let processedChunk = new Float32Array(chunk); // 기본값
 
-            // ───────────────── WASM AEC (temporarily disabled for diagnosis) ─────────────────
-            // if (systemAudioBuffer.length > 0) {
-            //     const latest = systemAudioBuffer[systemAudioBuffer.length - 1];
-            //     const sysF32 = base64ToFloat32Array(latest.data);
-            //     processedChunk = runAecSync(new Float32Array(chunk), sysF32);
-            // } else {
-            //     console.log('🔊 No system audio for AEC reference');
-            // }
+            // ───────────────── WASM AEC ─────────────────
+            // Only with a fresh reference: a stale chunk (system audio stopped or
+            // never started) would make the canceller subtract the wrong signal.
+            const latest = systemAudioBuffer[systemAudioBuffer.length - 1];
+            if (latest && Date.now() - latest.timestamp <= AEC_REFERENCE_MAX_AGE_MS) {
+                const sysF32 = base64ToFloat32Array(latest.data);
+                processedChunk = runAecSync(new Float32Array(chunk), sysF32);
+            }
 
             // ── Gain boost: amplify mic input ──
             const GAIN = 4.0;
@@ -328,19 +330,6 @@ async function setupMicProcessing(micStream) {
             for (let i = 0; i < processedChunk.length; i++) {
                 boosted[i] = Math.max(-1, Math.min(1, processedChunk[i] * GAIN));
             }
-
-            // ── Diagnostic: log first 10 chunks + any chunk with RMS > 0.01 (speech) ──
-            if (audioBuffer._diagCount === undefined) audioBuffer._diagCount = 0;
-            audioBuffer._diagCount++;
-            {
-                let sumSq = 0;
-                for (let i = 0; i < boosted.length; i++) sumSq += boosted[i] * boosted[i];
-                const rms = Math.sqrt(sumSq / boosted.length);
-                if (audioBuffer._diagCount <= 10 || rms > 0.01) {
-                    console.log(`[MicRMS] chunk #${audioBuffer._diagCount} rms=${rms.toFixed(6)} max=${Math.max(...boosted).toFixed(4)}`);
-                }
-            }
-            // ── End diagnostic ──
 
             const pcm16 = convertFloat32ToInt16(boosted);
             const b64 = arrayBufferToBase64(pcm16.buffer);
@@ -411,7 +400,6 @@ function setupSystemAudioProcessing(systemStream, existingContext = null) {
     let audioBuffer = [];
     const samplesPerChunk = SAMPLE_RATE * AUDIO_CHUNK_DURATION;
 
-    let _sysDiagCount = 0;
     systemProcessor.onaudioprocess = async e => {
         const inputData = e.inputBuffer.getChannelData(0);
         if (!inputData || inputData.length === 0) return;
@@ -426,21 +414,6 @@ function setupSystemAudioProcessing(systemStream, existingContext = null) {
             const boosted = new Float32Array(chunk.length);
             for (let i = 0; i < chunk.length; i++) {
                 boosted[i] = Math.max(-1, Math.min(1, chunk[i] * GAIN));
-            }
-
-            // ── Diagnostic RMS ──
-            _sysDiagCount++;
-            {
-                let sumSq = 0;
-                for (let i = 0; i < boosted.length; i++) sumSq += boosted[i] * boosted[i];
-                const rms = Math.sqrt(sumSq / boosted.length);
-                if (_sysDiagCount <= 10 || rms > 0.01) {
-                    console.log(`[SysRMS] chunk #${_sysDiagCount} rms=${rms.toFixed(6)} max=${Math.max(...boosted).toFixed(4)}`);
-                }
-                // First 3 chunks: also log to terminal via IPC
-                if (_sysDiagCount <= 3) {
-                    window.api.listenCapture.log(`[SysRMS] chunk #${_sysDiagCount} rms=${rms.toFixed(6)} max=${Math.max(...boosted).toFixed(4)}`);
-                }
             }
 
             const pcmData16 = convertFloat32ToInt16(boosted);

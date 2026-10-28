@@ -247,8 +247,12 @@ class ListenService {
     async closeSession() {
         try {
             this.sendToRenderer('change-listen-capture-state', { status: "stop" });
-            // Close STT sessions
+            // Close STT sessions (waits for the last turns to be saved)
             await this.sttService.closeSessions();
+
+            // Analyze the turns since the last periodic analysis; runs in the
+            // background on a snapshot, so resetting the history below is safe.
+            this.summaryService.finalizeSession();
 
             await this.stopMacOSAudioCapture();
 

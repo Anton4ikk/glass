@@ -1,9 +1,56 @@
 const { BrowserWindow } = require('electron');
-const { getSystemPrompt } = require('../../common/prompts/promptBuilder.js');
 const { createLLM } = require('../../common/ai/factory');
 const sessionRepository = require('../../common/repositories/session');
 const summaryRepository = require('./repositories');
 const modelStateService = require('../../common/services/modelStateService');
+
+// Analysis gets its own prompt: the shared 'pickle_glass_analysis' profile is
+// written for Ask (it promises a screenshot and forbids summaries), which
+// contradicted the summary format requested below.
+const ANALYSIS_SYSTEM_PROMPT = `You are the user's live meeting co-pilot. You receive a speech-to-text transcript of an ongoing conversation. Lines starting with "me:" are the user, lines starting with "them:" are the other participants.
+
+The transcript is machine-generated and may contain recognition errors: infer the intended meaning and ignore fragments that are clearly noise.
+
+Write all content in the language of the conversation, but keep the four section headers exactly as written in English (**Summary Overview**, **Key Topic: ...**, **Extended Explanation**, **Suggested Questions**), because they are parsed by software.
+
+If someone asked the user a question near the end of the transcript, start the Extended Explanation with a direct answer to it.
+
+<transcript>
+{{CONVERSATION_HISTORY}}
+</transcript>`;
+
+// Section headers the parser accepts, including translated ones a model may
+// produce despite the instruction above.
+const SECTION_HEADERS = [
+    { section: 'summary-overview', pattern: /^(summary overview|summary|обзор|краткое содержание|краткий обзор|резюме)/i },
+    { section: 'topic', pattern: /^(key topic|main topic|ключевая тема|основная тема|тема)/i },
+    { section: 'explanation', pattern: /^(extended explanation|explanation|подробное объяснение|подробнее|пояснение|объяснение)/i },
+    { section: 'questions', pattern: /^(suggested questions|follow-up questions|предлагаемые вопросы|рекомендуемые вопросы|вопросы)/i },
+];
+
+const EMPTY_ANALYSIS = {
+    summary: [],
+    topic: { header: '', bullets: [] },
+    actions: [],
+    followUps: [],
+};
+
+/**
+ * Recognizes "**Header**", "**Header:**", "## Header" and "**Key Topic: Name**".
+ * @returns {{section: string, topicName: string} | null}
+ */
+function detectSectionHeader(line) {
+    const match = line.match(/^#{0,6}\s*\*\*(.+?)\*\*:?\s*$/) || line.match(/^#{1,6}\s+(.+?)\s*$/);
+    if (!match) return null;
+
+    const headerText = match[1].trim().replace(/:$/, '');
+    const header = SECTION_HEADERS.find(h => h.pattern.test(headerText));
+    if (!header) return null;
+
+    const colon = headerText.indexOf(':');
+    const topicName = header.section === 'topic' && colon !== -1 ? headerText.slice(colon + 1).trim() : '';
+    return { section: header.section, topicName };
+}
 
 class SummaryService {
     constructor() {
@@ -11,7 +58,13 @@ class SummaryService {
         this.analysisHistory = [];
         this.conversationHistory = [];
         this.currentSessionId = null;
-        
+
+        // Analyses run in the background and can overlap or outlive their
+        // session; each one is numbered so an older answer never overwrites a newer one.
+        this.analysisSeq = 0;
+        this.lastAppliedSeqBySession = new Map();
+        this.lastAnalyzedCount = 0;
+
         // Callbacks
         this.onAnalysisComplete = null;
         this.onStatusUpdate = null;
@@ -29,7 +82,7 @@ class SummaryService {
     sendToRenderer(channel, data) {
         const { windowPool } = require('../../../window/windowManager');
         const listenWindow = windowPool?.get('listen');
-        
+
         if (listenWindow && !listenWindow.isDestroyed()) {
             listenWindow.webContents.send(channel, data);
         }
@@ -53,6 +106,7 @@ class SummaryService {
         this.conversationHistory = [];
         this.previousAnalysisResult = null;
         this.analysisHistory = [];
+        this.lastAnalyzedCount = 0;
         console.log('🔄 Conversation history and analysis state reset');
     }
 
@@ -67,53 +121,50 @@ class SummaryService {
         return conversationTexts.slice(-maxTurns).join('\n');
     }
 
-    async makeOutlineAndRequests(conversationTexts, maxTurns = 30) {
+    /**
+     * Asks the LLM for an analysis. Throws on failure so the caller can show it.
+     * @returns {Promise<{structuredData: object, responseText: string, model: string}>}
+     */
+    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, maxTurns = 30) {
         console.log(`🔍 makeOutlineAndRequests called - conversationTexts: ${conversationTexts.length}`);
-
-        if (conversationTexts.length === 0) {
-            console.log('⚠️ No conversation texts available for analysis');
-            return null;
-        }
 
         const recentConversation = this.formatConversationForPrompt(conversationTexts, maxTurns);
 
         // 이전 분석 결과를 프롬프트에 포함
         let contextualPrompt = '';
-        if (this.previousAnalysisResult) {
+        if (previousResult) {
             contextualPrompt = `
 Previous Analysis Context:
-- Main Topic: ${this.previousAnalysisResult.topic.header}
-- Key Points: ${this.previousAnalysisResult.summary.slice(0, 3).join(', ')}
-- Last Actions: ${this.previousAnalysisResult.actions.slice(0, 2).join(', ')}
+- Main Topic: ${previousResult.topic.header}
+- Key Points: ${previousResult.summary.slice(0, 3).join(', ')}
+- Last Actions: ${previousResult.actions.slice(0, 2).join(', ')}
 
 Please build upon this context while analyzing the new conversation segments.
 `;
         }
 
-        const basePrompt = getSystemPrompt('pickle_glass_analysis', '', false);
-        const systemPrompt = basePrompt.replace('{{CONVERSATION_HISTORY}}', recentConversation);
+        const systemPrompt = ANALYSIS_SYSTEM_PROMPT.replace('{{CONVERSATION_HISTORY}}', recentConversation);
 
-        try {
-            if (this.currentSessionId) {
-                await sessionRepository.touch(this.currentSessionId);
-            }
+        if (sessionId) {
+            await sessionRepository.touch(sessionId);
+        }
 
-            const modelInfo = await modelStateService.getCurrentModelInfo('llm');
-            if (!modelInfo || !modelInfo.apiKey) {
-                throw new Error('AI model or API key is not configured.');
-            }
-            console.log(`🤖 Sending analysis request to ${modelInfo.provider} using model ${modelInfo.model}`);
-            
-            const messages = [
-                {
-                    role: 'system',
-                    content: systemPrompt,
-                },
-                {
-                    role: 'user',
-                    content: `${contextualPrompt}
+        const modelInfo = await modelStateService.getCurrentModelInfo('llm');
+        if (!modelInfo || !modelInfo.apiKey) {
+            throw new Error('AI model or API key is not configured.');
+        }
+        console.log(`🤖 Sending analysis request to ${modelInfo.provider} using model ${modelInfo.model}`);
 
-Analyze the conversation and provide a structured summary. Respond in the same language as the conversation (e.g., if the conversation is in French, respond in French; if in English, respond in English). Format your response as follows:
+        const messages = [
+            {
+                role: 'system',
+                content: systemPrompt,
+            },
+            {
+                role: 'user',
+                content: `${contextualPrompt}
+
+Analyze the conversation and provide a structured summary. Respond in the same language as the conversation (e.g., if the conversation is in French, respond in French; if in English, respond in English), keeping the section headers in English. Format your response as follows:
 
 **Summary Overview**
 - Main discussion point with context
@@ -132,58 +183,25 @@ Provide 2-3 sentences explaining the context and implications.
 3. Third follow-up question?
 
 Keep all points concise and build upon previous analysis if provided.`,
-                },
-            ];
+            },
+        ];
 
-            console.log('🤖 Sending analysis request to AI...');
+        const llm = createLLM(modelInfo.provider, {
+            apiKey: modelInfo.apiKey,
+            model: modelInfo.model,
+            temperature: 0.7,
+            maxTokens: 1024,
+            usePortkey: modelInfo.provider === 'openai-glass',
+            portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
+        });
 
-            const llm = createLLM(modelInfo.provider, {
-                apiKey: modelInfo.apiKey,
-                model: modelInfo.model,
-                temperature: 0.7,
-                maxTokens: 1024,
-                usePortkey: modelInfo.provider === 'openai-glass',
-                portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
-            });
+        const completion = await llm.chat(messages);
 
-            const completion = await llm.chat(messages);
+        const responseText = completion.content;
+        console.log(`✅ Analysis response received: ${responseText}`);
+        const structuredData = this.parseResponseText(responseText, previousResult);
 
-            const responseText = completion.content;
-            console.log(`✅ Analysis response received: ${responseText}`);
-            const structuredData = this.parseResponseText(responseText, this.previousAnalysisResult);
-
-            if (this.currentSessionId) {
-                try {
-                    summaryRepository.saveSummary({
-                        sessionId: this.currentSessionId,
-                        text: responseText,
-                        tldr: structuredData.summary.join('\n'),
-                        bullet_json: JSON.stringify(structuredData.topic.bullets),
-                        action_json: JSON.stringify(structuredData.actions),
-                        model: modelInfo.model
-                    });
-                } catch (err) {
-                    console.error('[DB] Failed to save summary:', err);
-                }
-            }
-
-            // 분석 결과 저장
-            this.previousAnalysisResult = structuredData;
-            this.analysisHistory.push({
-                timestamp: Date.now(),
-                data: structuredData,
-                conversationLength: conversationTexts.length,
-            });
-
-            if (this.analysisHistory.length > 10) {
-                this.analysisHistory.shift();
-            }
-
-            return structuredData;
-        } catch (error) {
-            console.error('❌ Error during analysis generation:', error.message);
-            return this.previousAnalysisResult; // 에러 시 이전 결과 반환
-        }
+        return { structuredData, responseText, model: modelInfo.model };
     }
 
     parseResponseText(responseText, previousResult) {
@@ -203,35 +221,24 @@ Keep all points concise and build upon previous analysis if provided.`,
         try {
             const lines = responseText.split('\n');
             let currentSection = '';
-            let isCapturingTopic = false;
-            let topicName = '';
 
             for (const line of lines) {
                 const trimmedLine = line.trim();
 
                 // 섹션 헤더 감지
-                if (trimmedLine.startsWith('**Summary Overview**')) {
-                    currentSection = 'summary-overview';
-                    continue;
-                } else if (trimmedLine.startsWith('**Key Topic:')) {
-                    currentSection = 'topic';
-                    isCapturingTopic = true;
-                    topicName = trimmedLine.match(/\*\*Key Topic: (.+?)\*\*/)?.[1] || '';
-                    if (topicName) {
-                        structuredData.topic.header = topicName + ':';
+                const header = detectSectionHeader(trimmedLine);
+                if (header) {
+                    currentSection = header.section;
+                    if (header.topicName) {
+                        structuredData.topic.header = header.topicName + ':';
                     }
-                    continue;
-                } else if (trimmedLine.startsWith('**Extended Explanation**')) {
-                    currentSection = 'explanation';
-                    continue;
-                } else if (trimmedLine.startsWith('**Suggested Questions**')) {
-                    currentSection = 'questions';
                     continue;
                 }
 
                 // 컨텐츠 파싱
-                if (trimmedLine.startsWith('-') && currentSection === 'summary-overview') {
-                    const summaryPoint = trimmedLine.substring(1).trim();
+                const bulletMatch = trimmedLine.match(/^[-•*]\s+(.*)$/);
+                if (bulletMatch && currentSection === 'summary-overview') {
+                    const summaryPoint = bulletMatch[1].trim();
                     if (summaryPoint && !structuredData.summary.includes(summaryPoint)) {
                         // 기존 summary 업데이트 (최대 5개 유지)
                         structuredData.summary.unshift(summaryPoint);
@@ -239,8 +246,8 @@ Keep all points concise and build upon previous analysis if provided.`,
                             structuredData.summary.pop();
                         }
                     }
-                } else if (trimmedLine.startsWith('-') && currentSection === 'topic') {
-                    const bullet = trimmedLine.substring(1).trim();
+                } else if (bulletMatch && currentSection === 'topic') {
+                    const bullet = bulletMatch[1].trim();
                     if (bullet && structuredData.topic.bullets.length < 3) {
                         structuredData.topic.bullets.push(bullet);
                     }
@@ -256,8 +263,8 @@ Keep all points concise and build upon previous analysis if provided.`,
                             structuredData.topic.bullets.push(sentence);
                         }
                     });
-                } else if (trimmedLine.match(/^\d+\./) && currentSection === 'questions') {
-                    const question = trimmedLine.replace(/^\d+\.\s*/, '').trim();
+                } else if (currentSection === 'questions' && (/^\d+[.)]/.test(trimmedLine) || bulletMatch)) {
+                    const question = trimmedLine.replace(/^(\d+[.)]|[-•*])\s*/, '').trim();
                     if (question && question.includes('?')) {
                         structuredData.actions.push(`❓ ${question}`);
                     }
@@ -302,22 +309,98 @@ Keep all points concise and build upon previous analysis if provided.`,
     /**
      * Triggers analysis when conversation history reaches 5 texts.
      */
-    async triggerAnalysisIfNeeded() {
+    triggerAnalysisIfNeeded() {
         if (this.conversationHistory.length >= 5 && this.conversationHistory.length % 5 === 0) {
             console.log(`Triggering analysis - ${this.conversationHistory.length} conversation texts accumulated`);
+            this.runAnalysis();
+        }
+    }
 
-            const data = await this.makeOutlineAndRequests(this.conversationHistory);
-            if (data) {
-                console.log('Sending structured data to renderer');
-                this.sendToRenderer('summary-update', data);
-                
-                // Notify callback
-                if (this.onAnalysisComplete) {
-                    this.onAnalysisComplete(data);
-                }
-            } else {
-                console.log('No analysis data returned');
+    /**
+     * Called when listening stops: analyzes the turns added since the last
+     * analysis, which the every-5-turns trigger would otherwise never see.
+     * Runs in the background so Stop isn't held up by the LLM.
+     */
+    finalizeSession() {
+        if (this.conversationHistory.length > this.lastAnalyzedCount) {
+            console.log(`Final analysis - ${this.conversationHistory.length - this.lastAnalyzedCount} unanalyzed conversation texts`);
+            return this.runAnalysis();
+        }
+        return Promise.resolve();
+    }
+
+    async runAnalysis() {
+        const seq = ++this.analysisSeq;
+        const sessionId = this.currentSessionId;
+        const conversationTexts = [...this.conversationHistory];
+        this.lastAnalyzedCount = conversationTexts.length;
+
+        let result;
+        let error;
+        try {
+            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, this.previousAnalysisResult);
+        } catch (err) {
+            error = err;
+        }
+
+        // A newer analysis of the same session already landed: this one is stale.
+        if (seq < (this.lastAppliedSeqBySession.get(sessionId) || 0)) {
+            console.log(`Discarding stale analysis #${seq} for session ${sessionId}`);
+            return;
+        }
+        // The user may have started a new session meanwhile; then this result
+        // still belongs in its own session's record, but not on screen.
+        const isCurrentSession = sessionId === this.currentSessionId;
+
+        if (error) {
+            console.error('❌ Error during analysis generation:', error.message);
+            if (isCurrentSession) {
+                this.sendToRenderer('summary-update', {
+                    ...(this.previousAnalysisResult || EMPTY_ANALYSIS),
+                    error: error.message,
+                });
             }
+            return;
+        }
+
+        this.lastAppliedSeqBySession.set(sessionId, seq);
+        const { structuredData, responseText, model } = result;
+
+        if (sessionId) {
+            try {
+                await summaryRepository.saveSummary({
+                    sessionId,
+                    text: responseText,
+                    tldr: structuredData.summary.join('\n'),
+                    bullet_json: JSON.stringify(structuredData.topic.bullets),
+                    action_json: JSON.stringify(structuredData.actions),
+                    model,
+                });
+            } catch (err) {
+                console.error('[DB] Failed to save summary:', err);
+            }
+        }
+
+        if (!isCurrentSession) return;
+
+        // 분석 결과 저장
+        this.previousAnalysisResult = structuredData;
+        this.analysisHistory.push({
+            timestamp: Date.now(),
+            data: structuredData,
+            conversationLength: conversationTexts.length,
+        });
+
+        if (this.analysisHistory.length > 10) {
+            this.analysisHistory.shift();
+        }
+
+        console.log('Sending structured data to renderer');
+        this.sendToRenderer('summary-update', structuredData);
+
+        // Notify callback
+        if (this.onAnalysisComplete) {
+            this.onAnalysisComplete(structuredData);
         }
     }
 
@@ -330,4 +413,4 @@ Keep all points concise and build upon previous analysis if provided.`,
     }
 }
 
-module.exports = SummaryService; 
+module.exports = SummaryService;
