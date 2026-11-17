@@ -11,6 +11,18 @@
           }
         ]
       }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-on-stop.js\"",
+            "timeout": 180,
+            "statusMessage": "Running lint + tests for subagent (npm run check)..."
+          }
+        ]
+      }
     ]
   }
 }

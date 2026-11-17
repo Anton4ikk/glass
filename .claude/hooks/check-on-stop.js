@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-// Claude Code Stop hook: runs `npm run check` (lint errors + tests) before
-// Claude ends a turn, and sends failures back so Claude fixes them.
+// Claude Code Stop + SubagentStop hook: runs `npm run check` (lint errors + tests)
+// before Claude or a subagent ends its turn, and sends failures back so it fixes them.
 //
 // - Skips when no lintable/testable file differs from HEAD, or when the same
 //   set of changes already passed (fingerprint stored in .git/).
@@ -63,7 +63,10 @@ function readState(file) {
 }
 
 const input = readStdin();
-const counterFile = path.join(os.tmpdir(), `claude-check-blocks-${input.session_id || 'default'}`);
+// Also wired to SubagentStop. Subagents share the parent's session_id, so key the
+// block counter by agent_id too, or they would eat into the main agent's attempts.
+const counterKey = [input.session_id || 'default', input.agent_id].filter(Boolean).join('-');
+const counterFile = path.join(os.tmpdir(), `claude-check-blocks-${counterKey}`);
 const okFile = stateFile('claude-check-ok');
 
 let fingerprint;
