@@ -699,12 +699,14 @@ class OllamaService extends EventEmitter {
 
     async installMacOS(onProgress) {
         console.log('[OllamaService] Installing Ollama on macOS using DMG...');
-        
+
+        // Declared outside try: the catch block below cleans up dmgPath.
+        const dmgUrl = 'https://ollama.com/download/Ollama.dmg';
+        const tempDir = app.getPath('temp');
+        const dmgPath = path.join(tempDir, 'Ollama.dmg');
+        const mountPoint = path.join(tempDir, 'OllamaMount');
+
         try {
-            const dmgUrl = 'https://ollama.com/download/Ollama.dmg';
-            const tempDir = app.getPath('temp');
-            const dmgPath = path.join(tempDir, 'Ollama.dmg');
-            const mountPoint = path.join(tempDir, 'OllamaMount');
 
             // 체크포인트 저장
             await this.saveCheckpoint('pre-install');

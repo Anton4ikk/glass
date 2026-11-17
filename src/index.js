@@ -342,7 +342,7 @@ function setupWebDataHandlers() {
                     // Adapter injects UID
                     result = await sessionRepository.getAllByUserId();
                     break;
-                case 'get-session-details':
+                case 'get-session-details': {
                     const session = await sessionRepository.getById(payload);
                     if (!session) {
                         result = null;
@@ -355,10 +355,11 @@ function setupWebDataHandlers() {
                     ]);
                     result = { session, transcripts, ai_messages, summary };
                     break;
+                }
                 case 'delete-session':
                     result = await sessionRepository.deleteWithRelatedData(payload);
                     break;
-                case 'create-session':
+                case 'create-session': {
                     // Adapter injects UID
                     const id = await sessionRepository.create('ask');
                     if (payload && payload.title) {
@@ -366,6 +367,7 @@ function setupWebDataHandlers() {
                     }
                     result = { id };
                     break;
+                }
                 
                 // USER
                 case 'get-user-profile':
@@ -383,11 +385,12 @@ function setupWebDataHandlers() {
                     // Use ModelStateService as the single source of truth for API key management
                     result = await modelStateService.setApiKey(payload.provider, payload.apiKey);
                     break;
-                case 'check-api-key-status':
+                case 'check-api-key-status': {
                     // Use ModelStateService to check API key status
                     const hasApiKey = await modelStateService.hasValidApiKey();
                     result = { hasApiKey };
                     break;
+                }
                 case 'delete-account':
                     // Adapter injects UID
                     result = await userRepository.deleteById();
@@ -415,7 +418,7 @@ function setupWebDataHandlers() {
                     break;
                 
                 // BATCH
-                case 'get-batch-data':
+                case 'get-batch-data': {
                     const includes = payload ? payload.split(',').map(item => item.trim()) : ['profile', 'presets', 'sessions'];
                     const promises = {};
             
@@ -440,6 +443,7 @@ function setupWebDataHandlers() {
 
                     result = batchResult;
                     break;
+                }
 
                 default:
                     throw new Error(`Unknown web data channel: ${channel}`);
@@ -487,17 +491,18 @@ async function handleCustomUrl(url) {
             case 'personalize':
                 handlePersonalizeFromUrl(params);
                 break;
-            default:
+            default: {
                 const { windowPool } = require('./window/windowManager.js');
                 const header = windowPool.get('header');
                 if (header) {
                     if (header.isMinimized()) header.restore();
                     header.focus();
-                    
+
                     const targetUrl = `http://localhost:${WEB_PORT}/${action}`;
                     console.log(`[Custom URL] Navigating webview to: ${targetUrl}`);
                     header.webContents.loadURL(targetUrl);
                 }
+            }
         }
 
     } catch (error) {

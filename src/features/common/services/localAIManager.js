@@ -608,7 +608,7 @@ class LocalAIManager extends EventEmitter {
                 });
                 break;
                 
-            case 'service-not-responding':
+            case 'service-not-responding': {
                 // 서비스 반응 없음
                 console.log(`[LocalAIManager] Attempting to repair ${serviceName}...`);
                 const repairResult = await this.repairService(serviceName);
@@ -621,7 +621,8 @@ class LocalAIManager extends EventEmitter {
                     repairSuccessful: repairResult.success
                 });
                 break;
-                
+            }
+
             default:
                 // 기타 에러
                 this.emit('error-occurred', {

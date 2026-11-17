@@ -54,6 +54,16 @@ const settingsRepositoryAdapter = {
         const uid = authService.getCurrentUserId();
         return getBaseRepository().setSttLanguage(uid, language);
     },
+
+    getAskThinking: () => {
+        const uid = authService.getCurrentUserId();
+        return getBaseRepository().getAskThinking(uid);
+    },
+
+    setAskThinking: (enabled) => {
+        const uid = authService.getCurrentUserId();
+        return getBaseRepository().setAskThinking(uid, enabled);
+    },
 };
 
 module.exports = settingsRepositoryAdapter;

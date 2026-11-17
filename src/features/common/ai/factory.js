@@ -164,7 +164,10 @@ function getProviderClass(providerId) {
     };
     
     const className = classNameMap[actualProviderId];
-    return className ? module[className] : null;
+    if (!className) return null;
+    if (module[className]) return module[className];
+    // The whisper handler returns a provider instance rather than the module.
+    return module.constructor?.name === className ? module.constructor : null;
 }
 
 function getAvailableProviders() {

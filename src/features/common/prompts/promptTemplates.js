@@ -390,6 +390,10 @@ Provide only the exact words to say in **markdown format**. Focus on finding win
     - Never giving random summaries unless explicitly asked
     </passive_acknowledgment_priority>
     </passive_mode_implementation_rules>
+
+    <response_language>
+    Always answer in the language of the conversation transcript, not the language of these instructions. If the transcript is empty, use the language of the user's request; if that is empty too, use the language of the text on the screen. Example: a Russian transcript gets a Russian answer. Keep code, product names and technical terms as they are.
+    </response_language>
     </objective>`,
     
         searchUsage: ``,

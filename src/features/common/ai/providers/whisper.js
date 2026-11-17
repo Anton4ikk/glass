@@ -377,5 +377,8 @@ class WhisperProvider {
 
 module.exports = {
     WhisperProvider,
-    WhisperSTTSession
+    WhisperSTTSession,
+    // Exported for tests.
+    cleanTranscription,
+    chunkRms,
 };

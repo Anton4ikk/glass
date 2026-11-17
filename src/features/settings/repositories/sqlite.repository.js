@@ -180,6 +180,43 @@ function setSttLanguage(uid, language) {
     }
 }
 
+// Whether Ask lets reasoning models (gemma4, qwen3, ...) think before answering.
+// Off by default: on gemma4:e4b thinking moves the first word from ~5 s to ~30 s.
+function getAskThinking(uid) {
+    const db = sqliteClient.getDb();
+    const targetUid = uid || sqliteClient.defaultUserId;
+
+    try {
+        const row = db.prepare('SELECT ask_thinking FROM users WHERE uid = ?').get(targetUid);
+        return row?.ask_thinking === 1;
+    } catch (error) {
+        console.error('SQLite: Error getting ask_thinking setting:', error);
+        return false;
+    }
+}
+
+function setAskThinking(uid, enabled) {
+    const db = sqliteClient.getDb();
+    const targetUid = uid || sqliteClient.defaultUserId;
+    const value = enabled ? 1 : 0;
+
+    try {
+        const result = db.prepare('UPDATE users SET ask_thinking = ? WHERE uid = ?').run(value, targetUid);
+
+        // If no rows were updated, the user might not exist, so create them
+        if (result.changes === 0) {
+            const now = Math.floor(Date.now() / 1000);
+            const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, ask_thinking) VALUES (?, ?, ?, ?, ?)');
+            stmt.run(targetUid, 'User', 'user@example.com', now, value);
+        }
+
+        return { success: true, enabled: value === 1 };
+    } catch (error) {
+        console.error('SQLite: Error setting ask_thinking:', error);
+        throw error;
+    }
+}
+
 module.exports = {
     getPresets,
     getPresetTemplates,
@@ -190,6 +227,8 @@ module.exports = {
     setAutoUpdate,
     getSttLanguage,
     setSttLanguage,
+    getAskThinking,
+    setAskThinking,
     SUPPORTED_STT_LANGUAGES,
     DEFAULT_STT_LANGUAGE
 };

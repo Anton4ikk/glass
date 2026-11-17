@@ -5,6 +5,7 @@ const authService = require('../common/services/authService');
 const sessionRepository = require('../common/repositories/session');
 const sttRepository = require('./stt/repositories');
 const internalBridge = require('../../bridge/internalBridge');
+const modelStateService = require('../common/services/modelStateService');
 
 class ListenService {
     constructor() {
@@ -210,6 +211,8 @@ class ListenService {
             /* ------------------------------------------- */
 
             console.log('✅ Listen service initialized successfully.');
+
+            this.holdLocalLlmLoaded();
             
             this.sendToRenderer('update-status', 'Connected. Ready to listen.');
             
@@ -222,6 +225,19 @@ class ListenService {
             this.isInitializingSession = false;
             this.sendToRenderer('session-initializing', false);
             this.sendToRenderer('change-listen-capture-state', { status: "start" });
+        }
+    }
+
+    // A local Ollama LLM is kept in memory while listening, so the first Ask
+    // after a quiet stretch doesn't wait ~7 s for the model to reload.
+    async holdLocalLlmLoaded() {
+        try {
+            const modelInfo = await modelStateService.getCurrentModelInfo('llm');
+            if (modelInfo?.provider === 'ollama' && modelInfo.model) {
+                require('../common/ai/providers/ollama').holdModelLoaded(modelInfo.model);
+            }
+        } catch (error) {
+            console.warn('[ListenService] Could not keep the local LLM loaded:', error.message);
         }
     }
 
@@ -253,6 +269,8 @@ class ListenService {
             // Analyze the turns since the last periodic analysis; runs in the
             // background on a snapshot, so resetting the history below is safe.
             this.summaryService.finalizeSession();
+
+            require('../common/ai/providers/ollama').releaseModel();
 
             await this.stopMacOSAudioCapture();
 

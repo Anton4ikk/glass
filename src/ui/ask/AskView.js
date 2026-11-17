@@ -15,6 +15,7 @@ export class AskView extends LitElement {
         headerAnimating: { type: Boolean },
         isStreaming: { type: Boolean },
         errorMessage: { type: String },
+        reasoningChars: { type: Number },
     };
 
     static styles = css`
@@ -748,6 +749,7 @@ export class AskView extends LitElement {
         this.headerText = 'AI Response';
         this.headerAnimating = false;
         this.isStreaming = false;
+        this.reasoningChars = 0;
         this.errorMessage = '';
 
         this.marked = null;
@@ -829,6 +831,7 @@ export class AskView extends LitElement {
                 this.currentQuestion = newState.currentQuestion;
                 this.isLoading       = newState.isLoading;
                 this.isStreaming     = newState.isStreaming;
+                this.reasoningChars  = newState.reasoningChars || 0;
 
                 const wasHidden = !this.showTextInput;
                 this.showTextInput = newState.showTextInput;
@@ -956,6 +959,7 @@ export class AskView extends LitElement {
         this.currentQuestion = '';
         this.isLoading = false;
         this.isStreaming = false;
+        this.reasoningChars = 0;
         this.headerText = 'AI Response';
         this.showTextInput = true;
         this.errorMessage = '';
@@ -1369,7 +1373,13 @@ export class AskView extends LitElement {
 
     render() {
         const hasResponse = this.isLoading || this.currentResponse || this.isStreaming;
-        const headerText = this.isLoading ? 'Thinking...' : 'AI Response';
+        // ~4 characters per token: a rough but steady progress signal while a
+        // reasoning model thinks before its first answer word.
+        const headerText = !this.isLoading
+            ? 'AI Response'
+            : this.reasoningChars > 0
+              ? `Reasoning... ~${Math.round(this.reasoningChars / 4)} tokens`
+              : 'Thinking...';
 
         return html`
             <div class="ask-container">

@@ -216,6 +216,8 @@ contextBridge.exposeInMainWorld('api', {
     getSelectedModels: () => ipcRenderer.invoke('model:get-selected-models'),
     getSttLanguage: () => ipcRenderer.invoke('settings:get-stt-language'),
     setSttLanguage: (language) => ipcRenderer.invoke('settings:set-stt-language', language),
+    getAskThinking: () => ipcRenderer.invoke('settings:get-ask-thinking'),
+    setAskThinking: (enabled) => ipcRenderer.invoke('settings:set-ask-thinking', enabled),
     validateKey: (data) => ipcRenderer.invoke('model:validate-key', data),
     saveApiKey: (key) => ipcRenderer.invoke('model:save-api-key', key),
     removeApiKey: (provider) => ipcRenderer.invoke('model:remove-api-key', provider),

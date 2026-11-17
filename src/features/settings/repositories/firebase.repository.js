@@ -174,6 +174,32 @@ async function setSttLanguage(uid, language) {
     }
 }
 
+async function getAskThinking(uid) {
+    const userDocRef = doc(getFirestoreInstance(), 'users', uid);
+    try {
+        const userSnap = await getDoc(userDocRef);
+        return userSnap.exists() && userSnap.data().ask_thinking === true;
+    } catch (error) {
+        console.error('Firebase: Error getting ask_thinking setting:', error);
+        return false;
+    }
+}
+
+async function setAskThinking(uid, enabled) {
+    const userDocRef = doc(getFirestoreInstance(), 'users', uid);
+    try {
+        const userSnap = await getDoc(userDocRef);
+        if (userSnap.exists()) {
+            await updateDoc(userDocRef, { ask_thinking: !!enabled });
+        }
+        // If user doc does not exist, do nothing (no creation)
+        return { success: true, enabled: !!enabled };
+    } catch (error) {
+        console.error('Firebase: Error setting ask_thinking:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 module.exports = {
     getPresets,
     getPresetTemplates,
@@ -184,4 +210,6 @@ module.exports = {
     setAutoUpdate,
     getSttLanguage,
     setSttLanguage,
+    getAskThinking,
+    setAskThinking,
 };

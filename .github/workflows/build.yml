@@ -22,6 +22,12 @@ jobs:
       - name: 📦 Install root dependencies
         run: npm install
 
+      - name: 🔍 Lint
+        run: npm run lint
+
+      - name: 🧪 Test
+        run: npm test
+
       - name: 🌐 Install and build web (Renderer) part
         # Move to pickleglass_web directory and run commands
         working-directory: ./pickleglass_web

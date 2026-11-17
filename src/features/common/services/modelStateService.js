@@ -343,8 +343,25 @@ class ModelStateService extends EventEmitter {
 
             const providerId = setting.provider;
             if (providerId === 'ollama' && type === 'llm') {
+                // The periodic sync only runs every 30s, so right after
+                // `ollama pull` / `ollama rm` the table is stale. Sync now so
+                // the picker reflects what Ollama actually has.
+                try {
+                    await require('./ollamaService').syncState();
+                } catch (error) {
+                    console.warn('[ModelStateService] Ollama sync before listing models failed:', error.message);
+                }
                 const installed = ollamaModelRepository.getInstalledModels();
                 available.push(...installed.map(m => ({ id: m.name, name: m.name })));
+            } else if (providerId === 'whisper' && type === 'stt') {
+                // Only offer Whisper models whose weights are on disk.
+                try {
+                    const models = await require('./whisperService').getInstalledModels();
+                    const installedIds = new Set(models.filter(m => m.installed).map(m => m.id));
+                    available.push(...PROVIDERS.whisper.sttModels.filter(m => installedIds.has(m.id)));
+                } catch (error) {
+                    console.warn('[ModelStateService] Failed to list installed Whisper models:', error.message);
+                }
             } else if (PROVIDERS[providerId]?.[modelListKey]) {
                 available.push(...PROVIDERS[providerId][modelListKey]);
             }

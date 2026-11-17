@@ -534,6 +534,7 @@ export class SettingsView extends LitElement {
         // Whisper related properties
         whisperModels: { type: Array, state: true },
         sttLanguage: { type: String, state: true },
+        askThinking: { type: Boolean, state: true },
     };
     //////// after_modelStateService ////////
 
@@ -563,6 +564,7 @@ export class SettingsView extends LitElement {
         // Whisper related
         this.whisperModels = [];
         this.sttLanguage = 'en';
+        this.askThinking = false;
         this.whisperProgressTracker = null; // Will be initialized when needed
         this.handleUsePicklesKey = this.handleUsePicklesKey.bind(this)
         this.autoUpdateEnabled = true;
@@ -643,16 +645,18 @@ export class SettingsView extends LitElement {
         this.isLoading = true;
         try {
             // Load essential data first
-            const [userState, modelSettings, presets, contentProtection, shortcuts, sttLanguage] = await Promise.all([
+            const [userState, modelSettings, presets, contentProtection, shortcuts, sttLanguage, askThinking] = await Promise.all([
                 window.api.settingsView.getCurrentUser(),
                 window.api.settingsView.getModelSettings(), // Facade call
                 window.api.settingsView.getPresets(),
                 window.api.settingsView.getContentProtectionStatus(),
                 window.api.settingsView.getCurrentShortcuts(),
-                window.api.settingsView.getSttLanguage()
+                window.api.settingsView.getSttLanguage(),
+                window.api.settingsView.getAskThinking()
             ]);
 
             if (sttLanguage) this.sttLanguage = sttLanguage;
+            this.askThinking = askThinking === true;
             
             if (userState && userState.isLoggedIn) this.firebaseUser = userState;
             
@@ -762,6 +766,9 @@ export class SettingsView extends LitElement {
         this.selectedLlm = selected.llm;
         this.selectedStt = selected.stt;
         this.apiKeys = storedKeys;
+        // Installed badges come from ollamaModels / whisper flags, which are
+        // otherwise only loaded once when the view opens.
+        await this.loadLocalAIStatus();
         this.requestUpdate();
     }
     
@@ -797,6 +804,25 @@ export class SettingsView extends LitElement {
         } catch (error) {
             console.error('Failed to save STT language:', error);
             this.sttLanguage = previous; // Do not show a choice that was not stored
+            this.requestUpdate();
+        }
+    }
+
+    async selectAskThinking(enabled) {
+        if (enabled === this.askThinking) return;
+
+        const previous = this.askThinking;
+        this.askThinking = enabled; // Optimistic: the toggle should feel instant
+        this.requestUpdate();
+
+        try {
+            const result = await window.api.settingsView.setAskThinking(enabled);
+            if (result && result.success === false) {
+                throw new Error(result.error || 'Failed to save reasoning mode');
+            }
+        } catch (error) {
+            console.error('Failed to save Ask reasoning mode:', error);
+            this.askThinking = previous; // Do not show a choice that was not stored
             this.requestUpdate();
         }
     }
@@ -1410,6 +1436,24 @@ export class SettingsView extends LitElement {
                                 ?disabled=${this.saving}
                             >
                                 ${lang.label}
+                            </button>
+                        `)}
+                    </div>
+                </div>
+                <div class="model-select-group">
+                    <label title="For reasoning models such as gemma4 or qwen3: Deep thinks before answering - smarter, but the answer starts much later">Ask Reasoning</label>
+                    <div class="lang-toggle-options">
+                        ${[
+                            { enabled: false, label: 'Fast' },
+                            { enabled: true, label: 'Deep (slower)' },
+                        ].map(mode => html`
+                            <button
+                                class="lang-toggle-option"
+                                data-selected=${this.askThinking === mode.enabled ? 'true' : 'false'}
+                                @click=${() => this.selectAskThinking(mode.enabled)}
+                                ?disabled=${this.saving}
+                            >
+                                ${mode.label}
                             </button>
                         `)}
                     </div>

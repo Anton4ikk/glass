@@ -14,7 +14,9 @@
         "postbuild": "node scripts/reset-tcc.js",
         "build:win": "npm run build:all && electron-builder --win --x64 --publish never",
         "publish": "npm run build:all && electron-builder --config electron-builder.yml --publish always",
-        "lint": "eslint --ext .ts,.tsx,.js .",
+        "lint": "eslint .",
+        "test": "node scripts/run-tests.js",
+        "check": "npm run lint -- --quiet && npm test",
         "postinstall": "electron-builder install-app-deps",
         "build:renderer": "node build.js",
         "build:web": "cd pickleglass_web && npm run build && cd ..",
@@ -62,10 +64,13 @@
     "devDependencies": {
         "@electron/fuses": "^1.8.0",
         "@electron/notarize": "^2.5.0",
+        "@eslint/js": "^9.39.5",
         "electron": "^30.5.1",
         "electron-builder": "^26.0.12",
         "electron-reloader": "^1.2.3",
         "esbuild": "^0.25.5",
+        "eslint": "^9.39.5",
+        "globals": "^16.5.0",
         "prettier": "^3.6.2"
     },
     "optionalDependencies": {

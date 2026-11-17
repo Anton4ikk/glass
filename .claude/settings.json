@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/check-on-stop.js\"",
+            "timeout": 180,
+            "statusMessage": "Running lint + tests (npm run check)..."
+          }
+        ]
+      }
+    ]
+  }
+}

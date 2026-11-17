@@ -191,6 +191,10 @@ Keep all points concise and build upon previous analysis if provided.`,
             model: modelInfo.model,
             temperature: 0.7,
             maxTokens: 1024,
+            // Never reason here: the hidden reasoning (~1000 tokens on gemma4)
+            // would eat the 1024-token budget and leave an empty summary, and a
+            // slow background summary also holds up Ask in the Ollama queue.
+            think: false,
             usePortkey: modelInfo.provider === 'openai-glass',
             portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
         });

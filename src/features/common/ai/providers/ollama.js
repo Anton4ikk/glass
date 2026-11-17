@@ -74,6 +74,90 @@ class RequestQueue {
 // Global request queue instance
 const requestQueue = new RequestQueue();
 
+const DEFAULT_BASE_URL = 'http://localhost:11434';
+
+// --- Thinking ---------------------------------------------------------------
+// Reasoning models (gemma4, qwen3, ...) think by default. On gemma4:e4b that is
+// ~1000 hidden tokens, ~30 s before the first visible word. The 'think' flag is
+// sent only to models that report the capability: other models reject it.
+const thinkingCapabilityCache = new Map();
+
+async function supportsThinking(baseUrl, model) {
+    const key = `${baseUrl}|${model}`;
+    if (!thinkingCapabilityCache.has(key)) {
+        const lookup = fetch(`${baseUrl}/api/show`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model }),
+        })
+            .then(res => (res.ok ? res.json() : null))
+            .then(info => Array.isArray(info?.capabilities) && info.capabilities.includes('thinking'))
+            .catch(() => {
+                thinkingCapabilityCache.delete(key); // Ollama may be starting: ask again next time
+                return false;
+            });
+        thinkingCapabilityCache.set(key, lookup);
+    }
+    return thinkingCapabilityCache.get(key);
+}
+
+// Returns the request fields for the given think setting ({} = model default).
+async function thinkFields(baseUrl, model, think) {
+    if (typeof think !== 'boolean') return {};
+    return (await supportsThinking(baseUrl, model)) ? { think } : {};
+}
+
+// --- Keep-alive -------------------------------------------------------------
+// Ollama unloads a model 5 min after its last request, and reloading
+// gemma4:e4b costs ~7 s on the next Ask. While a listen session runs the model
+// is held in memory; the hold is renewed periodically instead of using
+// keep_alive=-1, so a crashed app cannot pin the model in memory forever.
+const HOLD_KEEP_ALIVE = '15m';
+// Ollama's own default. A request without keep_alive does not shorten the
+// timer of an already loaded model, so the release has to name it.
+const DEFAULT_KEEP_ALIVE = '5m';
+const HOLD_RENEW_MS = 10 * 60 * 1000;
+let heldModel = null;
+let holdTimer = null;
+
+function keepAliveFields(model) {
+    return heldModel === model ? { keep_alive: HOLD_KEEP_ALIVE } : {};
+}
+
+// An empty messages array loads the model (or resets its unload timer) without generating.
+async function sendLoadRequest(model, extra = {}) {
+    try {
+        const res = await fetch(`${DEFAULT_BASE_URL}/api/chat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model, messages: [], ...extra }),
+        });
+        if (!res.ok) console.warn(`[Ollama Provider] Load request for ${model} failed: ${res.status}`);
+    } catch (error) {
+        console.warn(`[Ollama Provider] Load request for ${model} failed: ${error.message}`);
+    }
+}
+
+function holdModelLoaded(model) {
+    if (!model) return;
+    if (heldModel && heldModel !== model) releaseModel();
+    heldModel = model;
+    console.log(`[Ollama Provider] Holding ${model} in memory for the listen session`);
+    sendLoadRequest(model, { keep_alive: HOLD_KEEP_ALIVE });
+    clearInterval(holdTimer);
+    holdTimer = setInterval(() => sendLoadRequest(model, { keep_alive: HOLD_KEEP_ALIVE }), HOLD_RENEW_MS);
+}
+
+function releaseModel() {
+    clearInterval(holdTimer);
+    holdTimer = null;
+    if (!heldModel) return;
+    const model = heldModel;
+    heldModel = null;
+    console.log(`[Ollama Provider] Releasing ${model} (back to Ollama's default unload timer)`);
+    sendLoadRequest(model, { keep_alive: DEFAULT_KEEP_ALIVE });
+}
+
 class OllamaProvider {
     static async validateApiKey() {
         try {
@@ -120,7 +204,8 @@ function createLLM({
     model, 
     temperature = 0.7, 
     maxTokens = 2048, 
-    baseUrl = 'http://localhost:11434',
+    baseUrl = DEFAULT_BASE_URL,
+    think,
     ...config 
 }) {
     if (!model) {
@@ -162,6 +247,8 @@ function createLLM({
                             model,
                             messages,
                             stream: false,
+                            ...(await thinkFields(baseUrl, model, think)),
+                            ...keepAliveFields(model),
                             options: {
                                 temperature,
                                 num_predict: maxTokens,
@@ -201,6 +288,8 @@ function createLLM({
                             model,
                             messages: ollamaMessages,
                             stream: false,
+                            ...(await thinkFields(baseUrl, model, think)),
+                            ...keepAliveFields(model),
                             options: {
                                 temperature,
                                 num_predict: maxTokens,
@@ -231,7 +320,8 @@ function createStreamingLLM({
     model, 
     temperature = 0.7, 
     maxTokens = 2048, 
-    baseUrl = 'http://localhost:11434',
+    baseUrl = DEFAULT_BASE_URL,
+    think,
     ...config 
 }) {
     if (!model) {
@@ -242,7 +332,10 @@ function createStreamingLLM({
             console.log('[Ollama Provider] Starting streaming request');
 
             const ollamaMessages = convertMessagesToOllamaFormat(messages);
-            console.log('[Ollama Provider] Converted messages for Ollama:', ollamaMessages);
+            // Summary only: the full messages carry the screenshot as ~100 KB of base64.
+            const imageCount = ollamaMessages.reduce((n, m) => n + (m.images?.length || 0), 0);
+            const textChars = ollamaMessages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
+            console.log(`[Ollama Provider] ${ollamaMessages.length} messages, ${textChars} text chars, ${imageCount} image(s), model ${model}`);
 
             // Streaming requests have priority over queued requests
             return await requestQueue.addStreamingRequest(async () => {
@@ -254,6 +347,8 @@ function createStreamingLLM({
                             model,
                             messages: ollamaMessages,
                             stream: true,
+                            ...(await thinkFields(baseUrl, model, think)),
+                            ...keepAliveFields(model),
                             options: {
                                 temperature,
                                 num_predict: maxTokens,
@@ -283,6 +378,15 @@ function createStreamingLLM({
                                         try {
                                             const data = JSON.parse(line);
                                             
+                                            // Reasoning is forwarded separately so the UI can show
+                                            // progress; it never becomes part of the answer.
+                                            if (data.message?.thinking) {
+                                                const sseData = JSON.stringify({
+                                                    choices: [{ delta: { reasoning: data.message.thinking } }]
+                                                });
+                                                controller.enqueue(new TextEncoder().encode(`data: ${sseData}\n\n`));
+                                            }
+
                                             if (data.message?.content) {
                                                 const sseData = JSON.stringify({
                                                     choices: [{
@@ -338,5 +442,7 @@ module.exports = {
     OllamaProvider,
     createLLM,
     createStreamingLLM,
-    convertMessagesToOllamaFormat
+    convertMessagesToOllamaFormat,
+    holdModelLoaded,
+    releaseModel,
 }; 

@@ -439,6 +439,26 @@ async function setSttLanguageSetting(language) {
     }
 }
 
+async function getAskThinkingSetting() {
+    try {
+        return await settingsRepository.getAskThinking();
+    } catch (error) {
+        console.error('[SettingsService] Error getting Ask thinking setting:', error);
+        return false; // Fallback to the schema default
+    }
+}
+
+async function setAskThinkingSetting(enabled) {
+    try {
+        const result = await settingsRepository.setAskThinking(!!enabled);
+        if (result?.success === false) return result;
+        return { success: true, enabled: !!enabled };
+    } catch (error) {
+        console.error('[SettingsService] Error setting Ask thinking setting:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 function initialize() {
     // cleanup
     windowNotificationManager.cleanup();
@@ -477,6 +497,8 @@ module.exports = {
     setAutoUpdateSetting,
     getSttLanguageSetting,
     setSttLanguageSetting,
+    getAskThinkingSetting,
+    setAskThinkingSetting,
     // Model settings facade
     getModelSettings,
     clearApiKey,

@@ -35,6 +35,10 @@ try {
 }
 let lastScreenshot = null;
 
+const SCREENSHOT_HEIGHT = 768;
+// How often reasoning progress is pushed to the Ask window.
+const REASONING_BROADCAST_MS = 250;
+
 async function captureScreenshot(options = {}) {
     if (process.platform === 'darwin') {
         try {
@@ -48,8 +52,11 @@ async function captureScreenshot(options = {}) {
             if (sharp) {
                 try {
                     // Try using sharp for optimal image processing
+                    // 768 px: at 384 px vision models can't read screen text and
+                    // invent it (gemma4:e4b read "main.cpp" off a README). 768 px
+                    // costs ~440 image tokens vs ~130, about +1.5 s on gemma4:e4b.
                     const resizedBuffer = await sharp(imageBuffer)
-                        .resize({ height: 384 })
+                        .resize({ height: SCREENSHOT_HEIGHT, withoutEnlargement: true })
                         .jpeg({ quality: 80 })
                         .toBuffer();
 
@@ -133,6 +140,7 @@ class AskService {
             currentQuestion: '',
             currentResponse: '',
             showTextInput: true,
+            reasoningChars: 0,
         };
         console.log('[AskService] Service instance created.');
     }
@@ -188,6 +196,7 @@ class AskService {
                 currentQuestion: '',
                 currentResponse: '',
                 showTextInput  : true,
+                reasoningChars : 0,
             };
             this._broadcastState();
     
@@ -224,6 +233,7 @@ class AskService {
             currentQuestion: userPrompt,
             currentResponse: '',
             showTextInput: false,
+            reasoningChars: 0,
         };
         this._broadcastState();
 
@@ -273,11 +283,17 @@ class AskService {
                 });
             }
             
+            // Lazy-required: settingsService pulls in the window manager.
+            const think = await require('../settings/settingsService').getAskThinkingSetting();
+
             const streamingLLM = createStreamingLLM(modelInfo.provider, {
                 apiKey: modelInfo.apiKey,
                 model: modelInfo.model,
                 temperature: 0.7,
-                maxTokens: 2048,
+                // Reasoning tokens count against this limit, so leave room for
+                // the answer when thinking is on.
+                maxTokens: think ? 4096 : 2048,
+                think,
                 usePortkey: modelInfo.provider === 'openai-glass',
                 portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
             });
@@ -370,9 +386,12 @@ class AskService {
     async _processStream(reader, askWin, sessionId, signal) {
         const decoder = new TextDecoder();
         let fullResponse = '';
+        let lastReasoningBroadcast = 0;
 
         try {
-            this.state.isLoading = false;
+            // isLoading stays on until the first answer token: a reasoning model
+            // can think for tens of seconds first, and the loader (with reasoning
+            // progress) says more than an empty response pane.
             this.state.isStreaming = true;
             this._broadcastState();
             while (true) {
@@ -390,9 +409,19 @@ class AskService {
                         }
                         try {
                             const json = JSON.parse(data);
-                            const token = json.choices[0]?.delta?.content || '';
+                            const delta = json.choices[0]?.delta || {};
+                            if (delta.reasoning) {
+                                this.state.reasoningChars += delta.reasoning.length;
+                                const now = Date.now();
+                                if (now - lastReasoningBroadcast >= REASONING_BROADCAST_MS) {
+                                    lastReasoningBroadcast = now;
+                                    this._broadcastState();
+                                }
+                            }
+                            const token = delta.content || '';
                             if (token) {
                                 fullResponse += token;
+                                this.state.isLoading = false;
                                 this.state.currentResponse = fullResponse;
                                 this._broadcastState();
                             }
@@ -411,6 +440,7 @@ class AskService {
                 }
             }
         } finally {
+            this.state.isLoading = false;
             this.state.isStreaming = false;
             this.state.currentResponse = fullResponse;
             this._broadcastState();
