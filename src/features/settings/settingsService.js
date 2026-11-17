@@ -403,7 +403,7 @@ async function updateContentProtection(enabled) {
 
 async function getAutoUpdateSetting() {
     try {
-        return settingsRepository.getAutoUpdate();
+        return await settingsRepository.getAutoUpdate();
     } catch (error) {
         console.error('[SettingsService] Error getting auto update setting:', error);
         return true; // Fallback to enabled

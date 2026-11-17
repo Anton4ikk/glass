@@ -197,6 +197,7 @@ describe('SummaryService auto answer', () => {
 
     test('answers each new question once, newest first', () => {
         const service = new SummaryService();
+        service.setSessionId('session-1');
         const asked = recordAsks(() => {
             service.autoAnswerNewestQuestion({ questions: ['Как развернуть связный список?'] });
             service.autoAnswerNewestQuestion({ questions: ['Как развернуть связный список?'] });
@@ -208,6 +209,7 @@ describe('SummaryService auto answer', () => {
 
     test('the task on screen is answered first, once, then spoken questions', () => {
         const service = new SummaryService();
+        service.setSessionId('session-1');
         const data = text => service.parseResponseText(text, null, 'ru');
         const withTask = data('**Screen Task**\nLeetCode Two Sum, Python\n**Open Questions**\n1. Есть ли ошибка в коде?');
         const asked = recordAsks(() => {
@@ -221,4 +223,69 @@ describe('SummaryService auto answer', () => {
         ]);
     });
 
+
+    test('no auto answers after Stop, even though the answered lists were reset', () => {
+        const service = new SummaryService();
+        service.setSessionId('session-1');
+        service.runAnalysis = async () => {};
+        const asked = recordAsks(() => {
+            service.autoAnswerNewestQuestion({ questions: ['Как решить задачу?'] });
+            service.finalizeSession();
+            service.resetConversationHistory();
+            // An analysis that was still running when Stop was pressed lands now.
+            service.autoAnswerNewestQuestion({ questions: ['Как решить задачу?'] });
+        });
+        assert.deepEqual(asked, ['Как решить задачу?']);
+    });
 });
+
+describe('SummaryService auto answer vs the user', () => {
+    test('Russian inflections of the same question count as one', () => {
+        const { isSameQuestion } = SummaryService;
+        assert.equal(isSameQuestion('Как решить задачу Two Sum?', 'Как решить эту задачу Two Sum?'), true);
+        // Only the stems match here: every word is inflected differently.
+        assert.equal(isSameQuestion('Объясни решение задачи', 'Объяснить решения задач'), true);
+    });
+
+    test('does not replace an answer to a question the user asked, and retries later', () => {
+        const askService = require('../src/features/ask/askService');
+        const original = { send: askService.sendMessage, busy: askService.isAnsweringUser };
+        const asked = [];
+        askService.sendMessage = async (question, _history, options) => asked.push([question, options?.source]);
+        try {
+            const service = new SummaryService();
+            service.setSessionId('session-1');
+            askService.isAnsweringUser = () => true;
+            service.autoAnswerNewestQuestion({ questions: ['Какая сложность?'] });
+            assert.deepEqual(asked, []);
+
+            askService.isAnsweringUser = () => false;
+            service.autoAnswerNewestQuestion({ questions: ['Какая сложность?'] });
+            assert.deepEqual(asked, [['Какая сложность?', 'auto']]);
+        } finally {
+            askService.sendMessage = original.send;
+            askService.isAnsweringUser = original.busy;
+        }
+    });
+
+    test('the final analysis after Stop still builds on the previous result', async () => {
+        const service = new SummaryService();
+        service.setSessionId('session-1');
+        service.previousAnalysisResult = { questions: ['Earlier?'], summary: ['p'], topic: { header: 'T:', bullets: [] } };
+        service.conversationHistory.push('them: new turn');
+        service.captureScreen = async () => null;
+        service.getAnswerLanguage = async () => null;
+        let seenPrevious;
+        service.makeOutlineAndRequests = async (_texts, _id, previous) => {
+            seenPrevious = previous;
+            throw new Error('stop here');
+        };
+        service.sendToRenderer = () => {};
+
+        const final = service.finalizeSession();
+        service.resetConversationHistory(); // what closeSession() does right after
+        await final;
+        assert.deepEqual(seenPrevious?.questions, ['Earlier?']);
+    });
+});
+

@@ -172,8 +172,10 @@ class WhisperSTTSession extends EventEmitter {
                 '-m', modelPath,
                 '-f', tempFile,
                 '--no-timestamps',
-                '--output-txt',
-                '--output-json',
+                // No --output-txt/--output-json: the text is read from stdout,
+                // and whisper-cli names those files "<input>.wav.txt", which
+                // cleanupTempFile never matched, so they piled up in temp/.
+                // whisperService.logTranscription() keeps the debug trail instead.
                 '--language', this.language,
                 '--threads', '4'
                 // No --print-progress: it is a valueless toggle in whisper-cli,
@@ -203,9 +205,12 @@ class WhisperSTTSession extends EventEmitter {
                 this.process = null;
                 this.isProcessing = false;
                 
+                let transcription = '';
+                let emitted = false;
                 if (code === 0 && output.trim()) {
-                    const transcription = cleanTranscription(output);
+                    transcription = cleanTranscription(output);
                     if (transcription && transcription !== this.lastTranscription) {
+                        emitted = true;
                         this.lastTranscription = transcription;
                         console.log(`[WhisperSTT-${this.sessionId}] Transcription: "${transcription}"`);
                         this.emit('transcription', {
@@ -219,6 +224,19 @@ class WhisperSTTSession extends EventEmitter {
                     // Not logged after close(): then the run was killed on purpose.
                     console.error(`[WhisperSTT-${this.sessionId}] Process error:`, errorOutput);
                 }
+
+                // Includes chunks the filters dropped, which the DB never sees.
+                await this.whisperService.logTranscription?.({
+                    session: this.sessionId,
+                    model: this.model,
+                    language: this.language,
+                    audioSec: +(audioData.length / BYTES_PER_SECOND).toFixed(2),
+                    code,
+                    raw: output.trim(),
+                    text: transcription,
+                    emitted,
+                    ...(code !== 0 && errorOutput ? { error: errorOutput.slice(-500) } : {}),
+                });
 
                 await this.whisperService.cleanupTempFile(tempFile);
                 resolve();
@@ -330,7 +348,12 @@ class WhisperProvider {
     async createSTT(config) {
         await this.initialize();
         
-        const model = config.model || 'whisper-tiny';
+        // No silent default: falling back to a model nobody selected would also
+        // download its weights behind the user's back.
+        const model = config.model;
+        if (!model) {
+            throw new Error('Whisper STT requires a model; none is selected.');
+        }
         const sessionType = config.sessionType || 'unknown';
         // Falls back to 'auto' only when nothing was configured; the user's
         // explicit choice beats whisper's own detection, which is unreliable

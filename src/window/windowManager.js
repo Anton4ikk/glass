@@ -793,6 +793,7 @@ const handleHeaderStateChanged = (state) => {
 module.exports = {
     createWindows,
     windowPool,
+    getCurrentHeaderState: () => currentHeaderState,
     toggleContentProtection,
     resizeHeaderWindow,
     setContentProtection,

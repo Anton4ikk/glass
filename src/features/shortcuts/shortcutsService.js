@@ -200,11 +200,12 @@ class ShortcutsService {
         });
 
         // --- User-configurable shortcuts ---
-        if (header?.currentHeaderState === 'apikey') {
+        // Before setup (API key / permission headers) the feature windows don't exist yet.
+        // Lazy: windowManager requires this module.
+        if (require('../../window/windowManager').getCurrentHeaderState() !== 'main') {
             if (keybinds.toggleVisibility) {
                 globalShortcut.register(keybinds.toggleVisibility, () => this.toggleAllWindowsVisibility());
             }
-            console.log('[Shortcuts] ApiKeyHeader is active, only toggleVisibility shortcut is registered.');
             return;
         }
 
@@ -224,7 +225,7 @@ class ShortcutsService {
                     callback = () => {
                         const askWindow = this.windowPool.get('ask');
                         if (askWindow && !askWindow.isDestroyed() && askWindow.isVisible()) {
-                            askWindow.webContents.send('scroll-response-up');
+                            askWindow.webContents.send('aks:scrollResponseUp');
                         }
                     };
                     break;
@@ -232,7 +233,7 @@ class ShortcutsService {
                     callback = () => {
                         const askWindow = this.windowPool.get('ask');
                         if (askWindow && !askWindow.isDestroyed() && askWindow.isVisible()) {
-                            askWindow.webContents.send('scroll-response-down');
+                            askWindow.webContents.send('aks:scrollResponseDown');
                         }
                     };
                     break;
@@ -257,19 +258,8 @@ class ShortcutsService {
                         }
                      };
                      break;
-                case 'manualScreenshot':
-                    callback = () => {
-                        if(mainWindow && !mainWindow.isDestroyed()) {
-                             mainWindow.webContents.executeJavaScript('window.captureManualScreenshot && window.captureManualScreenshot();');
-                        }
-                    };
-                    break;
-                case 'previousResponse':
-                    callback = () => sendToRenderer('navigate-previous-response');
-                    break;
-                case 'nextResponse':
-                    callback = () => sendToRenderer('navigate-next-response');
-                    break;
+                // manualScreenshot, previousResponse, nextResponse: no window handles
+                // them, and a registered global shortcut would block the key in every app.
             }
             
             if (callback) {

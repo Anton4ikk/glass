@@ -1,29 +1,20 @@
-// renderer.js
 const listenCapture = require('./listenCapture.js');
-const params        = new URLSearchParams(window.location.search);
-const isListenView  = params.get('view') === 'listen';
 
+const isListenView = new URLSearchParams(window.location.search).get('view') === 'listen';
 
 window.pickleGlass = {
     startCapture: listenCapture.startCapture,
     stopCapture: listenCapture.stopCapture,
     isLinux: listenCapture.isLinux,
     isMacOS: listenCapture.isMacOS,
-    captureManualScreenshot: listenCapture.captureManualScreenshot,
-    getCurrentScreenshot: listenCapture.getCurrentScreenshot,
 };
 
-
+// Every feature window loads this bundle; only the listen window captures audio.
 window.api.renderer.onChangeListenCaptureState((_event, { status }) => {
-    if (!isListenView) {
-        console.log('[Renderer] Non-listen view: ignoring capture-state change');
-        return;
-    }
-    if (status === "stop") {
-        console.log('[Renderer] Session ended – stopping local capture');
+    if (!isListenView) return;
+    if (status === 'stop') {
         listenCapture.stopCapture();
     } else {
-        console.log('[Renderer] Session initialized – starting local capture');
         listenCapture.startCapture();
     }
 });

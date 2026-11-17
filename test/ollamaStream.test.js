@@ -39,4 +39,18 @@ describe('ollamaStreamSource', () => {
 
         assert.equal(body.destroyed, true);
     });
+
+    test('a Cyrillic letter split across two chunks is decoded intact', async () => {
+        const body = new PassThrough();
+        const reader = new ReadableStream(ollamaStreamSource(body)).getReader();
+
+        const bytes = Buffer.from(line({ message: { content: 'Привет' } }));
+        // Cut inside the two-byte "П".
+        const cut = bytes.indexOf(Buffer.from('П')) + 1;
+        body.write(bytes.subarray(0, cut));
+        body.write(bytes.subarray(cut));
+
+        const { value } = await reader.read();
+        assert.equal(new TextDecoder().decode(value), 'data: {"choices":[{"delta":{"content":"Привет"}}]}\n\n');
+    });
 });

@@ -63,8 +63,8 @@ contextBridge.exposeInMainWorld('api', {
     removeOnLocalAIProgress: (callback) => ipcRenderer.removeListener('localai:install-progress', callback),
     onLocalAIComplete: (callback) => ipcRenderer.on('localai:installation-complete', callback),
     removeOnLocalAIComplete: (callback) => ipcRenderer.removeListener('localai:installation-complete', callback),
-    onLocalAIError: (callback) => ipcRenderer.on('localai:error-notification', callback),
-    removeOnLocalAIError: (callback) => ipcRenderer.removeListener('localai:error-notification', callback),
+    onLocalAIError: (callback) => ipcRenderer.on('localai:error-occurred', callback),
+    removeOnLocalAIError: (callback) => ipcRenderer.removeListener('localai:error-occurred', callback),
     onLocalAIModelReady: (callback) => ipcRenderer.on('localai:model-ready', callback),
     removeOnLocalAIModelReady: (callback) => ipcRenderer.removeListener('localai:model-ready', callback),
     
@@ -74,7 +74,7 @@ contextBridge.exposeInMainWorld('api', {
       // LocalAI 통합 이벤트
       ipcRenderer.removeAllListeners('localai:install-progress');
       ipcRenderer.removeAllListeners('localai:installation-complete');
-      ipcRenderer.removeAllListeners('localai:error-notification');
+      ipcRenderer.removeAllListeners('localai:error-occurred');
       ipcRenderer.removeAllListeners('localai:model-ready');
       ipcRenderer.removeAllListeners('localai:service-status-changed');
     }

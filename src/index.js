@@ -1,17 +1,10 @@
-// try {
-//     const reloader = require('electron-reloader');
-//     reloader(module, {
-//     });
-// } catch (err) {
-// }
-
 require('dotenv').config();
 
 if (require('electron-squirrel-startup')) {
     process.exit(0);
 }
 
-const { app, BrowserWindow, shell, ipcMain, dialog, desktopCapturer, session } = require('electron');
+const { app, BrowserWindow, dialog, desktopCapturer, session } = require('electron');
 const { createWindows } = require('./window/windowManager.js');
 const listenService = require('./features/listen/listenService');
 const { initializeFirebase } = require('./features/common/services/firebaseClient');
@@ -22,7 +15,6 @@ const express = require('express');
 const fetch = require('node-fetch');
 const { autoUpdater } = require('electron-updater');
 const { EventEmitter } = require('events');
-const askService = require('./features/ask/askService');
 const settingsService = require('./features/settings/settingsService');
 const sessionRepository = require('./features/common/repositories/session');
 const modelStateService = require('./features/common/services/modelStateService');
@@ -35,9 +27,8 @@ const eventBridge = new EventEmitter();
 let WEB_PORT = 3000;
 let isShuttingDown = false; // Flag to prevent infinite shutdown loop
 
-//////// after_modelStateService ////////
+// Read by authService, settingsService and ollamaService, which would otherwise require it in a cycle.
 global.modelStateService = modelStateService;
-//////// after_modelStateService ////////
 
 // Import and initialize OllamaService
 const ollamaService = require('./features/common/services/ollamaService');
@@ -193,16 +184,11 @@ app.whenReady().then(async () => {
         await databaseInitializer.initialize();
         console.log('>>> [index.js] Database initialized successfully');
         
-        // Clean up zombie sessions from previous runs first - MOVED TO authService
-        // sessionRepository.endAllActiveSessions();
-
+        // Also ends zombie sessions left by a previous run.
         await authService.initialize();
-
-        //////// after_modelStateService ////////
         await modelStateService.initialize();
-        //////// after_modelStateService ////////
 
-        featureBridge.initialize();  // 추가: featureBridge 초기화
+        featureBridge.initialize();
         windowBridge.initialize();
         setupWebDataHandlers();
 
@@ -248,6 +234,10 @@ app.whenReady().then(async () => {
     }
 });
 
+const SHUTDOWN_STEP_TIMEOUT_MS = 5000;
+const withTimeout = (promise, ms) =>
+    Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms))]);
+
 app.on('before-quit', async (event) => {
     // Prevent infinite loop by checking if shutdown is already in progress
     if (isShuttingDown) {
@@ -271,9 +261,10 @@ app.on('before-quit', async (event) => {
         await listenService.closeSession();
         console.log('[Shutdown] Audio capture stopped');
         
-        // 2. End all active sessions (database operations) - with error handling
+        // 2. End all active sessions (database operations) - with error handling.
+        // Capped: an offline Firestore commit would otherwise block quitting forever.
         try {
-            await sessionRepository.endAllActiveSessions();
+            await withTimeout(sessionRepository.endAllActiveSessions(), SHUTDOWN_STEP_TIMEOUT_MS);
             console.log('[Shutdown] Active sessions ended');
         } catch (dbError) {
             console.warn('[Shutdown] Could not end active sessions (database may be closed):', dbError.message);
@@ -298,7 +289,10 @@ app.on('before-quit', async (event) => {
             }
         }
         
-        // 4. Close database connections (final cleanup)
+        // 4. The summary of the last listen session is still being written.
+        await withTimeout(listenService.finalAnalysis, SHUTDOWN_STEP_TIMEOUT_MS).catch(() => {});
+
+        // 5. Close database connections (final cleanup)
         try {
             databaseInitializer.close();
             console.log('[Shutdown] Database connections closed');
@@ -604,7 +598,6 @@ function handlePersonalizeFromUrl(params) {
 
 async function startWebStack() {
   console.log('NODE_ENV =', process.env.NODE_ENV); 
-  const isDev = !app.isPackaged;
 
   const getAvailablePort = () => {
     return new Promise((resolve, reject) => {
@@ -682,7 +675,7 @@ async function startWebStack() {
   
   frontSrv.use(express.static(staticDir));
   
-  const frontendServer = await new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     const server = frontSrv.listen(frontendPort, '127.0.0.1', () => resolve(server));
     server.on('error', reject);
     app.once('before-quit', () => server.close());
@@ -693,7 +686,7 @@ async function startWebStack() {
   const apiSrv = express();
   apiSrv.use(nodeApi);
 
-  const apiServer = await new Promise((resolve, reject) => {
+  await new Promise((resolve, reject) => {
     const server = apiSrv.listen(apiPort, '127.0.0.1', () => resolve(server));
     server.on('error', reject);
     app.once('before-quit', () => server.close());
@@ -710,19 +703,19 @@ async function startWebStack() {
 
 // Auto-update initialization
 async function initAutoUpdater() {
-    if (process.env.NODE_ENV === 'development') {
-        console.log('Development environment, skipping auto-updater.');
-        return;
-    }
+    if (process.env.NODE_ENV === 'development') return;
 
     try {
-        await autoUpdater.checkForUpdates();
-        autoUpdater.on('update-available', () => {
-            console.log('Update available!');
-            autoUpdater.downloadUpdate();
-        });
-        autoUpdater.on('update-downloaded', (event, releaseNotes, releaseName, date, url) => {
-            console.log('Update downloaded:', releaseNotes, releaseName, date, url);
+        // The Settings toggle was never read here.
+        const settingsService = require('./features/settings/settingsService');
+        if (!(await settingsService.getAutoUpdateSetting())) {
+            console.log('[AutoUpdater] Disabled in settings.');
+            return;
+        }
+
+        // Listeners first: checkForUpdates() emits 'update-available' before it resolves.
+        autoUpdater.on('update-available', () => autoUpdater.downloadUpdate());
+        autoUpdater.on('update-downloaded', (event, releaseNotes, releaseName) => {
             dialog.showMessageBox({
                 type: 'info',
                 title: 'Application Update',
@@ -734,10 +727,10 @@ async function initAutoUpdater() {
                 }
             });
         });
-        autoUpdater.on('error', (err) => {
-            console.error('Error in auto-updater:', err);
-        });
+        autoUpdater.on('error', err => console.error('[AutoUpdater] Error:', err));
+
+        await autoUpdater.checkForUpdates();
     } catch (err) {
-        console.error('Error initializing auto-updater:', err);
+        console.error('[AutoUpdater] Error initializing auto-updater:', err);
     }
 }

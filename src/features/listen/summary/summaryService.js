@@ -1,8 +1,8 @@
-const { BrowserWindow } = require('electron');
 const { createLLM } = require('../../common/ai/factory');
 const sessionRepository = require('../../common/repositories/session');
 const summaryRepository = require('./repositories');
 const modelStateService = require('../../common/services/modelStateService');
+const { isTextOnly, markTextOnly } = require('../../common/ai/textOnlyModels');
 
 // Analysis gets its own prompt: the shared 'pickle_glass_analysis' profile is
 // written for Ask (it promises a screenshot and forbids summaries), which
@@ -21,6 +21,23 @@ The first two sections matter most: each question there is answered in detail el
 {{CONVERSATION_HISTORY}}
 </transcript>`;
 
+const RESPONSE_FORMAT = `**Screen Task**
+The task or code on my screen, or: none
+
+**Open Questions**
+1. Newest question or task raised?
+2. Earlier question still open?
+
+**Summary Overview**
+- Main discussion point with context
+
+**Key Topic: [Topic Name]**
+- First key insight
+- Second key insight
+
+**Extended Explanation**
+1-2 sentences on the context and implications.`;
+
 const LANGUAGE_RULES = {
     ru: 'Write all content in Russian.',
     en: 'Write all content in English.',
@@ -30,10 +47,19 @@ const DEFAULT_LANGUAGE_RULE = 'Write all content in the language of the conversa
 // New turns arriving within this window are analyzed together (the "me" and
 // "them" streams often flush a turn each at the same moment).
 const ANALYSIS_DEBOUNCE_MS = 1500;
+const MAX_PROMPT_TURNS = 30;
+// Extraction, not creative writing: a low temperature keeps the open
+// questions worded the same between runs, so fewer look new to the auto answer.
+const ANALYSIS_TEMPERATURE = 0.3;
 
-// What the model writes in the Open Questions section when there are none.
+// What the model writes in a section when it has nothing for it.
 const NO_QUESTIONS = /^(none|нет|—|-|n\/a)\.?$/i;
 const MAX_OPEN_QUESTIONS = 6;
+const MAX_SUMMARY_POINTS = 5;
+const MAX_TOPIC_BULLETS = 3;
+const MAX_ACTIONS = 5;
+// Stale-result bookkeeping is only needed for the last few sessions.
+const MAX_TRACKED_SESSIONS = 8;
 
 // The task on screen is always offered first, worded so Ask both solves it
 // and checks the code that is already written.
@@ -42,11 +68,16 @@ const SCREEN_TASK_QUESTIONS = {
     en: task => `Solve the task on screen (${task}). If there is code on screen, check it, find and fix any bugs.`,
 };
 
-// Fixed one-click requests under the insights, in the answer language.
+// Fixed one-click requests, in the answer language.
 const DEFAULT_ACTIONS = {
     ru: ['✨ Что мне сказать дальше?', '💬 Предложи уточняющие вопросы'],
     en: ['✨ What should I say next?', '💬 Suggest follow-up questions'],
 };
+const FOLLOW_UPS = {
+    ru: ['✉️ Составь письмо по итогам', '✅ Составь список задач', '📝 Покажи итоги'],
+    en: ['✉️ Draft a follow-up email', '✅ Generate action items', '📝 Show summary'],
+};
+const forLanguage = (table, language) => table[language] || table.en;
 
 // Section headers the parser accepts, including translated ones a model may
 // produce despite the instruction above.
@@ -59,7 +90,7 @@ const SECTION_HEADERS = [
     { section: 'questions', pattern: /^(suggested questions|follow-up questions|предлагаемые вопросы|рекомендуемые вопросы|вопросы)/i },
 ];
 
-const EMPTY_ANALYSIS = {
+const emptyAnalysis = () => ({
     screenTask: '',
     screenTaskQuestion: '',
     questions: [],
@@ -67,7 +98,12 @@ const EMPTY_ANALYSIS = {
     topic: { header: '', bullets: [] },
     actions: [],
     followUps: [],
-};
+});
+
+// Word prefixes stand in for stems: Russian inflects heavily ("задача",
+// "задачу", "задачи"), and the model re-words its questions on every run.
+const STEM_LENGTH = 5;
+const stems = text => new Set((text.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []).map(w => w.slice(0, STEM_LENGTH)));
 
 /**
  * Whether two questions are the same one, rephrased. The model rewrites the
@@ -75,9 +111,8 @@ const EMPTY_ANALYSIS = {
  * auto answer for a question that was already answered.
  */
 function isSameQuestion(a, b) {
-    const words = text => new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
-    const wa = words(a);
-    const wb = words(b);
+    const wa = stems(a);
+    const wb = stems(b);
     if (wa.size === 0 || wb.size === 0) return false;
     let common = 0;
     for (const w of wa) if (wb.has(w)) common++;
@@ -101,10 +136,11 @@ function detectSectionHeader(line) {
     return { section: header.section, topicName };
 }
 
+const stripListMarker = line => line.replace(/^(\d+[.)]|[-•*])\s*/, '').trim();
+
 class SummaryService {
     constructor() {
         this.previousAnalysisResult = null;
-        this.analysisHistory = [];
         this.conversationHistory = [];
         this.currentSessionId = null;
 
@@ -123,39 +159,28 @@ class SummaryService {
         // Questions already answered automatically in this session.
         this.autoAnsweredQuestions = [];
         this.autoAnsweredScreenTasks = [];
-
-        // Models that rejected the screenshot; their analyses are text-only.
-        this.textOnlyModels = new Set();
-
-        // Callbacks
-        this.onAnalysisComplete = null;
-        this.onStatusUpdate = null;
-    }
-
-    setCallbacks({ onAnalysisComplete, onStatusUpdate }) {
-        this.onAnalysisComplete = onAnalysisComplete;
-        this.onStatusUpdate = onStatusUpdate;
+        // Auto answers only while listening. Analyses still running when the
+        // user presses Stop update the insights but must not open Ask again:
+        // closing the session clears the answered lists above, so to them
+        // every question would look new.
+        this.autoAnswerEnabled = false;
     }
 
     setSessionId(sessionId) {
         this.currentSessionId = sessionId;
+        this.autoAnswerEnabled = true;
     }
 
     sendToRenderer(channel, data) {
         const { windowPool } = require('../../../window/windowManager');
         const listenWindow = windowPool?.get('listen');
-
         if (listenWindow && !listenWindow.isDestroyed()) {
             listenWindow.webContents.send(channel, data);
         }
     }
 
     addConversationTurn(speaker, text) {
-        const conversationText = `${speaker.toLowerCase()}: ${text.trim()}`;
-        this.conversationHistory.push(conversationText);
-        console.log(`💬 Added conversation text: ${conversationText}`);
-        console.log(`📈 Total conversation history: ${this.conversationHistory.length} texts`);
-
+        this.conversationHistory.push(`${speaker.toLowerCase()}: ${text.trim()}`);
         this.scheduleAnalysis();
     }
 
@@ -166,23 +191,14 @@ class SummaryService {
     resetConversationHistory() {
         this.conversationHistory = [];
         this.previousAnalysisResult = null;
-        this.analysisHistory = [];
         this.lastAnalyzedCount = 0;
         this.cancelScheduledAnalysis();
         this.analysisPending = false;
         this.autoAnsweredQuestions = [];
         this.autoAnsweredScreenTasks = [];
-        console.log('🔄 Conversation history and analysis state reset');
     }
 
-    /**
-     * Converts conversation history into text to include in the prompt.
-     * @param {Array<string>} conversationTexts - Array of conversation texts ["me: ~~~", "them: ~~~", ...]
-     * @param {number} maxTurns - Maximum number of recent turns to include
-     * @returns {string} - Formatted conversation string for the prompt
-     */
-    formatConversationForPrompt(conversationTexts, maxTurns = 30) {
-        if (conversationTexts.length === 0) return '';
+    formatConversationForPrompt(conversationTexts, maxTurns = MAX_PROMPT_TURNS) {
         return conversationTexts.slice(-maxTurns).join('\n');
     }
 
@@ -190,94 +206,58 @@ class SummaryService {
      * Asks the LLM for an analysis. Throws on failure so the caller can show it.
      * @returns {Promise<{structuredData: object, responseText: string, model: string}>}
      */
-    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { maxTurns = 30, screenshotBase64 = null, language = null } = {}) {
-        console.log(`🔍 makeOutlineAndRequests called - conversationTexts: ${conversationTexts.length}`);
-
-        const recentConversation = this.formatConversationForPrompt(conversationTexts, maxTurns);
-
-        // 이전 분석 결과를 프롬프트에 포함
-        let contextualPrompt = '';
-        if (previousResult) {
-            const previousQuestions = (previousResult.questions || []).map(q => `  - ${q}`).join('\n');
-            contextualPrompt = `
-Previous Analysis Context:
-- Main Topic: ${previousResult.topic.header}
-- Key Points: ${previousResult.summary.slice(0, 3).join(', ')}
-- Open Questions so far:
-${previousQuestions || '  (none)'}
-
-Please build upon this context while analyzing the new conversation segments.
-`;
-        }
-
-        const systemPrompt = ANALYSIS_SYSTEM_PROMPT
-            .replace('{{LANGUAGE_RULE}}', LANGUAGE_RULES[language] || DEFAULT_LANGUAGE_RULE)
-            .replace('{{CONVERSATION_HISTORY}}', recentConversation);
-
-        if (sessionId) {
-            await sessionRepository.touch(sessionId);
-        }
-
+    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { screenshotBase64 = null, language = null } = {}) {
         const modelInfo = await modelStateService.getCurrentModelInfo('llm');
         if (!modelInfo || !modelInfo.apiKey) {
             throw new Error('AI model or API key is not configured.');
         }
-        console.log(`🤖 Sending analysis request to ${modelInfo.provider} using model ${modelInfo.model}`);
+        if (sessionId) await sessionRepository.touch(sessionId);
 
-        const messages = [
-            {
-                role: 'system',
-                content: systemPrompt,
-            },
+        const systemPrompt = ANALYSIS_SYSTEM_PROMPT.replace('{{LANGUAGE_RULE}}', LANGUAGE_RULES[language] || DEFAULT_LANGUAGE_RULE).replace(
+            '{{CONVERSATION_HISTORY}}',
+            this.formatConversationForPrompt(conversationTexts)
+        );
+
+        const previousContext = previousResult
+            ? `Previous Analysis Context:
+- Main Topic: ${previousResult.topic.header}
+- Key Points: ${previousResult.summary.slice(0, 3).join(', ')}
+- Open Questions so far:
+${(previousResult.questions || []).map(q => `  - ${q}`).join('\n') || '  (none)'}
+
+Please build upon this context while analyzing the new conversation segments.
+
+`
+            : '';
+        const languageReminder = LANGUAGE_RULES[language]
+            ? ` ${LANGUAGE_RULES[language]} This includes the screen task and every open question; the template above is in English only to show the format.`
+            : '';
+        const userText = `${previousContext}Analyze the conversation${screenshotBase64 ? ' and the screenshot of my screen' : ''}. Format your response as follows:
+
+${RESPONSE_FORMAT}
+
+Keep all points concise and build upon previous analysis if provided.${languageReminder}`;
+
+        const textMessages = [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userText },
+        ];
+        const sendImage = screenshotBase64 && !isTextOnly(modelInfo.model);
+        const imageMessages = sendImage && [
+            textMessages[0],
             {
                 role: 'user',
-                content: `${contextualPrompt}
-
-Analyze the conversation${screenshotBase64 ? ' and the screenshot of my screen' : ''}. Format your response as follows:
-
-**Screen Task**
-The task or code on my screen, or: none
-
-**Open Questions**
-1. Newest question or task raised?
-2. Earlier question still open?
-
-**Summary Overview**
-- Main discussion point with context
-
-**Key Topic: [Topic Name]**
-- First key insight
-- Second key insight
-
-**Extended Explanation**
-1-2 sentences on the context and implications.
-
-Keep all points concise and build upon previous analysis if provided.${
-                    LANGUAGE_RULES[language]
-                        ? ` ${LANGUAGE_RULES[language]} This includes the screen task and every open question; the template above is in English only to show the format.`
-                        : ''
-                }`,
+                content: [
+                    { type: 'text', text: userText },
+                    { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${screenshotBase64}` } },
+                ],
             },
         ];
-
-        const textOnly = !screenshotBase64 || this.textOnlyModels.has(modelInfo.model);
-        const withScreenshot = textOnly
-            ? messages
-            : [
-                  messages[0],
-                  {
-                      role: 'user',
-                      content: [
-                          { type: 'text', text: messages[1].content },
-                          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${screenshotBase64}` } },
-                      ],
-                  },
-              ];
 
         const llm = createLLM(modelInfo.provider, {
             apiKey: modelInfo.apiKey,
             model: modelInfo.model,
-            temperature: 0.7,
+            temperature: ANALYSIS_TEMPERATURE,
             maxTokens: 1024,
             // Never reason here: the hidden reasoning (~1000 tokens on gemma4)
             // would eat the 1024-token budget and leave an empty summary, and a
@@ -288,164 +268,109 @@ Keep all points concise and build upon previous analysis if provided.${
         });
 
         let completion;
-        try {
-            completion = await llm.chat(withScreenshot);
-        } catch (error) {
-            if (textOnly) throw error;
-            // The model may not accept images: remember that and go text-only.
-            console.warn(`[SummaryService] Analysis with screenshot failed on ${modelInfo.model}, retrying text-only:`, error.message);
-            this.textOnlyModels.add(modelInfo.model);
-            completion = await llm.chat(messages);
+        if (!sendImage) {
+            completion = await llm.chat(textMessages);
+        } else {
+            try {
+                completion = await llm.chat(imageMessages);
+            } catch (error) {
+                console.warn(`[SummaryService] ${modelInfo.model} rejected the screenshot, analyzing text-only:`, error.message);
+                markTextOnly(modelInfo.model);
+                completion = await llm.chat(textMessages);
+            }
         }
 
         const responseText = completion.content;
-        console.log(`✅ Analysis response received: ${responseText}`);
         const structuredData = this.parseResponseText(responseText, previousResult, language);
-
         return { structuredData, responseText, model: modelInfo.model };
     }
 
     parseResponseText(responseText, previousResult, language = null) {
-        const structuredData = {
-            screenTask: '',
-            screenTaskQuestion: '',
-            questions: [],
-            summary: [],
-            topic: { header: '', bullets: [] },
-            actions: [],
-            followUps: ['✉️ Draft a follow-up email', '✅ Generate action items', '📝 Show summary'],
-        };
+        const data = emptyAnalysis();
+        data.followUps = [...forLanguage(FOLLOW_UPS, language)];
+        if (previousResult) {
+            data.topic.header = previousResult.topic.header;
+            data.summary = [...previousResult.summary];
+        }
+
         let sawQuestionsSection = false;
         let sawScreenTaskSection = false;
+        let currentSection = '';
 
-        // 이전 결과가 있으면 기본값으로 사용
-        if (previousResult) {
-            structuredData.topic.header = previousResult.topic.header;
-            structuredData.summary = [...previousResult.summary];
-        }
+        for (const line of responseText.split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
 
-        try {
-            const lines = responseText.split('\n');
-            let currentSection = '';
+            const header = detectSectionHeader(trimmed);
+            if (header) {
+                currentSection = header.section;
+                if (currentSection === 'open-questions') sawQuestionsSection = true;
+                if (currentSection === 'screen-task') sawScreenTaskSection = true;
+                if (header.topicName) data.topic.header = `${header.topicName}:`;
+                continue;
+            }
 
-            for (const line of lines) {
-                const trimmedLine = line.trim();
-
-                // 섹션 헤더 감지
-                const header = detectSectionHeader(trimmedLine);
-                if (header) {
-                    currentSection = header.section;
-                    if (currentSection === 'open-questions') sawQuestionsSection = true;
-                    if (currentSection === 'screen-task') sawScreenTaskSection = true;
-                    if (header.topicName) {
-                        structuredData.topic.header = header.topicName + ':';
-                    }
-                    continue;
+            const bullet = trimmed.match(/^[-•*]\s+(.*)$/)?.[1].trim();
+            switch (currentSection) {
+                case 'screen-task': {
+                    const task = trimmed.replace(/^[-•*]\s*/, '').trim();
+                    if (!data.screenTask && !NO_QUESTIONS.test(task)) data.screenTask = task;
+                    break;
                 }
-
-                // 컨텐츠 파싱
-                const bulletMatch = trimmedLine.match(/^[-•*]\s+(.*)$/);
-                if (currentSection === 'screen-task' && trimmedLine) {
-                    const task = trimmedLine.replace(/^[-•*]\s*/, '').trim();
-                    if (!structuredData.screenTask && !NO_QUESTIONS.test(task)) {
-                        structuredData.screenTask = task;
+                case 'open-questions': {
+                    const question = stripListMarker(trimmed);
+                    if (question && !NO_QUESTIONS.test(question) && !data.questions.includes(question) && data.questions.length < MAX_OPEN_QUESTIONS) {
+                        data.questions.push(question);
                     }
-                } else if (currentSection === 'open-questions' && trimmedLine) {
-                    const question = trimmedLine.replace(/^(\d+[.)]|[-•*])\s*/, '').trim();
-                    if (
-                        question &&
-                        !NO_QUESTIONS.test(question) &&
-                        !structuredData.questions.includes(question) &&
-                        structuredData.questions.length < MAX_OPEN_QUESTIONS
-                    ) {
-                        structuredData.questions.push(question);
+                    break;
+                }
+                case 'summary-overview':
+                    // Newest point first; points carried over from the previous run drop off the end.
+                    if (bullet && !data.summary.includes(bullet)) {
+                        data.summary.unshift(bullet);
+                        if (data.summary.length > MAX_SUMMARY_POINTS) data.summary.pop();
                     }
-                } else if (bulletMatch && currentSection === 'summary-overview') {
-                    const summaryPoint = bulletMatch[1].trim();
-                    if (summaryPoint && !structuredData.summary.includes(summaryPoint)) {
-                        // 기존 summary 업데이트 (최대 5개 유지)
-                        structuredData.summary.unshift(summaryPoint);
-                        if (structuredData.summary.length > 5) {
-                            structuredData.summary.pop();
+                    break;
+                case 'topic':
+                    if (bullet && data.topic.bullets.length < MAX_TOPIC_BULLETS) data.topic.bullets.push(bullet);
+                    break;
+                case 'explanation':
+                    for (const part of trimmed.split(/\.\s+/)) {
+                        const sentence = part.trim();
+                        if (!sentence) continue;
+                        const withDot = sentence.endsWith('.') ? sentence : `${sentence}.`;
+                        if (data.topic.bullets.length < MAX_TOPIC_BULLETS && !data.topic.bullets.includes(withDot)) {
+                            data.topic.bullets.push(withDot);
                         }
                     }
-                } else if (bulletMatch && currentSection === 'topic') {
-                    const bullet = bulletMatch[1].trim();
-                    if (bullet && structuredData.topic.bullets.length < 3) {
-                        structuredData.topic.bullets.push(bullet);
+                    break;
+                case 'questions':
+                    if (/^\d+[.)]/.test(trimmed) || bullet) {
+                        const question = stripListMarker(trimmed);
+                        if (question.includes('?')) data.actions.push(`❓ ${question}`);
                     }
-                } else if (currentSection === 'explanation' && trimmedLine) {
-                    // explanation을 topic bullets에 추가 (문장 단위로)
-                    const sentences = trimmedLine
-                        .split(/\.\s+/)
-                        .filter(s => s.trim().length > 0)
-                        .map(s => s.trim() + (s.endsWith('.') ? '' : '.'));
-
-                    sentences.forEach(sentence => {
-                        if (structuredData.topic.bullets.length < 3 && !structuredData.topic.bullets.includes(sentence)) {
-                            structuredData.topic.bullets.push(sentence);
-                        }
-                    });
-                } else if (currentSection === 'questions' && (/^\d+[.)]/.test(trimmedLine) || bulletMatch)) {
-                    const question = trimmedLine.replace(/^(\d+[.)]|[-•*])\s*/, '').trim();
-                    if (question && question.includes('?')) {
-                        structuredData.actions.push(`❓ ${question}`);
-                    }
-                }
+                    break;
             }
-
-            // 기본 액션 추가
-            const defaultActions = DEFAULT_ACTIONS[language] || DEFAULT_ACTIONS.en;
-            defaultActions.forEach(action => {
-                if (!structuredData.actions.includes(action)) {
-                    structuredData.actions.push(action);
-                }
-            });
-
-            // 액션 개수 제한
-            structuredData.actions = structuredData.actions.slice(0, 5);
-
-            // The model returns the full updated list each time; if it skipped
-            // the section entirely, keep the previous list instead of wiping it.
-            if (!sawQuestionsSection && previousResult?.questions) {
-                structuredData.questions = [...previousResult.questions];
-            }
-            if (!sawScreenTaskSection && previousResult?.screenTask) {
-                structuredData.screenTask = previousResult.screenTask;
-            }
-            if (structuredData.screenTask) {
-                const template = SCREEN_TASK_QUESTIONS[language] || SCREEN_TASK_QUESTIONS.en;
-                structuredData.screenTaskQuestion = template(structuredData.screenTask);
-            }
-
-            // 유효성 검증 및 이전 데이터 병합
-            if (structuredData.summary.length === 0 && previousResult) {
-                structuredData.summary = previousResult.summary;
-            }
-            if (structuredData.topic.bullets.length === 0 && previousResult) {
-                structuredData.topic.bullets = previousResult.topic.bullets;
-            }
-        } catch (error) {
-            console.error('❌ Error parsing response text:', error);
-            // 에러 시 이전 결과 반환
-            return (
-                previousResult || {
-                    summary: [],
-                    topic: { header: 'Analysis in progress', bullets: [] },
-                    actions: ['✨ What should I say next?', '💬 Suggest follow-up questions'],
-                    followUps: ['✉️ Draft a follow-up email', '✅ Generate action items', '📝 Show summary'],
-                }
-            );
         }
 
-        console.log('📊 Final structured data:', JSON.stringify(structuredData, null, 2));
-        return structuredData;
+        for (const action of forLanguage(DEFAULT_ACTIONS, language)) {
+            if (!data.actions.includes(action)) data.actions.push(action);
+        }
+        data.actions = data.actions.slice(0, MAX_ACTIONS);
+
+        // The model returns the full updated list each time; if it skipped
+        // the section entirely, keep the previous one instead of wiping it.
+        if (!sawQuestionsSection && previousResult?.questions) data.questions = [...previousResult.questions];
+        if (!sawScreenTaskSection && previousResult?.screenTask) data.screenTask = previousResult.screenTask;
+        if (data.screenTask) data.screenTaskQuestion = forLanguage(SCREEN_TASK_QUESTIONS, language)(data.screenTask);
+
+        if (previousResult && data.topic.bullets.length === 0) data.topic.bullets = previousResult.topic.bullets;
+        return data;
     }
 
     /**
      * Runs an analysis shortly after every new turn, so answers show up while
-     * the conversation is still going. Only one analysis runs at a time; turns
-     * that arrive meanwhile are covered by one follow-up run.
+     * the conversation is still going.
      */
     scheduleAnalysis() {
         this.cancelScheduledAnalysis();
@@ -482,59 +407,53 @@ Keep all points concise and build upon previous analysis if provided.${
     }
 
     /**
-     * Called when listening stops: analyzes the turns added since the last
-     * analysis, which the every-5-turns trigger would otherwise never see.
+     * Called when listening stops: analyzes the turns that arrived after the
+     * last live analysis started (or were still in the debounce window).
      * Runs in the background so Stop isn't held up by the LLM.
      */
     finalizeSession() {
+        this.autoAnswerEnabled = false;
         this.cancelScheduledAnalysis();
         this.analysisPending = false;
         if (this.conversationHistory.length > this.lastAnalyzedCount) {
-            console.log(`Final analysis - ${this.conversationHistory.length - this.lastAnalyzedCount} unanalyzed conversation texts`);
             return this.runAnalysis();
         }
         return Promise.resolve();
     }
 
     async runAnalysis() {
+        // Everything the analysis depends on is read now: Stop resets this
+        // service's state while the final analysis is still in flight.
         const seq = ++this.analysisSeq;
         const sessionId = this.currentSessionId;
         const conversationTexts = [...this.conversationHistory];
+        const previousResult = this.previousAnalysisResult;
         this.lastAnalyzedCount = conversationTexts.length;
 
         let result;
         let error;
         try {
             const [screenshotBase64, language] = await Promise.all([this.captureScreen(), this.getAnswerLanguage()]);
-            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, this.previousAnalysisResult, {
-                screenshotBase64,
-                language,
-            });
+            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { screenshotBase64, language });
         } catch (err) {
             error = err;
         }
 
         // A newer analysis of the same session already landed: this one is stale.
-        if (seq < (this.lastAppliedSeqBySession.get(sessionId) || 0)) {
-            console.log(`Discarding stale analysis #${seq} for session ${sessionId}`);
-            return;
-        }
+        if (seq < (this.lastAppliedSeqBySession.get(sessionId) || 0)) return;
         // The user may have started a new session meanwhile; then this result
         // still belongs in its own session's record, but not on screen.
         const isCurrentSession = sessionId === this.currentSessionId;
 
         if (error) {
-            console.error('❌ Error during analysis generation:', error.message);
+            console.error('[SummaryService] Analysis failed:', error.message);
             if (isCurrentSession) {
-                this.sendToRenderer('summary-update', {
-                    ...(this.previousAnalysisResult || EMPTY_ANALYSIS),
-                    error: error.message,
-                });
+                this.sendToRenderer('summary-update', { ...(this.previousAnalysisResult || emptyAnalysis()), error: error.message });
             }
             return;
         }
 
-        this.lastAppliedSeqBySession.set(sessionId, seq);
+        this.markApplied(sessionId, seq);
         const { structuredData, responseText, model } = result;
 
         if (sessionId) {
@@ -548,42 +467,36 @@ Keep all points concise and build upon previous analysis if provided.${
                     model,
                 });
             } catch (err) {
-                console.error('[DB] Failed to save summary:', err);
+                console.error('[SummaryService] Failed to save summary:', err);
             }
         }
 
         if (!isCurrentSession) return;
-
-        // 분석 결과 저장
         this.previousAnalysisResult = structuredData;
-        this.analysisHistory.push({
-            timestamp: Date.now(),
-            data: structuredData,
-            conversationLength: conversationTexts.length,
-        });
-
-        if (this.analysisHistory.length > 10) {
-            this.analysisHistory.shift();
-        }
-
-        console.log('Sending structured data to renderer');
         this.sendToRenderer('summary-update', structuredData);
-
         this.autoAnswerNewestQuestion(structuredData);
+    }
 
-        // Notify callback
-        if (this.onAnalysisComplete) {
-            this.onAnalysisComplete(structuredData);
+    markApplied(sessionId, seq) {
+        this.lastAppliedSeqBySession.delete(sessionId);
+        this.lastAppliedSeqBySession.set(sessionId, seq);
+        if (this.lastAppliedSeqBySession.size > MAX_TRACKED_SESSIONS) {
+            this.lastAppliedSeqBySession.delete(this.lastAppliedSeqBySession.keys().next().value);
         }
     }
 
     /**
      * Answers in Ask without a click: first the task on screen (once per
      * task), then the newest question heard. A newer question interrupts the
-     * answer to an older one; a question that was already answered (even if
-     * rephrased) is not repeated.
+     * auto answer to an older one; a question that was already answered (even
+     * if rephrased) is not repeated. A question the user asked themselves is
+     * never interrupted: the auto answer waits for the next analysis.
      */
     autoAnswerNewestQuestion({ screenTask, screenTaskQuestion, questions } = {}) {
+        if (!this.autoAnswerEnabled) return;
+        const askService = require('../../ask/askService');
+        if (askService.isAnsweringUser?.()) return;
+
         let question = null;
         if (screenTask && !this.autoAnsweredScreenTasks.some(t => isSameQuestion(t, screenTask))) {
             this.autoAnsweredScreenTasks.push(screenTask);
@@ -598,8 +511,7 @@ Keep all points concise and build upon previous analysis if provided.${
         if (!question) return;
 
         console.log(`[SummaryService] Auto-answering: ${question}`);
-        const askService = require('../../ask/askService');
-        askService.sendMessage(question, [...this.conversationHistory]).catch(error => {
+        askService.sendMessage(question, [...this.conversationHistory], { source: 'auto' }).catch(error => {
             console.error('[SummaryService] Auto answer failed:', error.message);
         });
     }
@@ -622,14 +534,6 @@ Keep all points concise and build upon previous analysis if provided.${
         } catch {
             return null;
         }
-    }
-
-    getCurrentAnalysisData() {
-        return {
-            previousResult: this.previousAnalysisResult,
-            history: this.analysisHistory,
-            conversationLength: this.conversationHistory.length,
-        };
     }
 }
 

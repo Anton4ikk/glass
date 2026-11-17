@@ -1,22 +1,22 @@
-const { BrowserWindow } = require('electron');
 const { createStreamingLLM } = require('../common/ai/factory');
-// Lazy require helper to avoid circular dependency issues
-const getWindowManager = () => require('../../window/windowManager');
 const internalBridge = require('../../bridge/internalBridge');
-
-const getWindowPool = () => {
-    try {
-        return getWindowManager().windowPool;
-    } catch {
-        return null;
-    }
-};
-
 const sessionRepository = require('../common/repositories/session');
 const askRepository = require('./repositories');
 const { getSystemPrompt } = require('../common/prompts/promptBuilder');
 const modelStateService = require('../common/services/modelStateService');
 const { captureScreenshot } = require('../common/utils/screenCapture');
+const { isTextOnly, markTextOnly } = require('../common/ai/textOnlyModels');
+
+// Lazy: the window manager requires feature services itself.
+const getWindowPool = () => {
+    try {
+        return require('../../window/windowManager').windowPool;
+    } catch {
+        return null;
+    }
+};
+// Lazy: settingsService pulls in the window manager.
+const getSettingsService = () => require('../settings/settingsService');
 
 // The RU/EN switch in Settings sets the language of the conversation; answers
 // follow it, whatever language the question or the screen is in.
@@ -25,108 +25,152 @@ const ANSWER_LANGUAGE_RULES = {
     en: 'IMPORTANT: Write your entire answer in English.',
 };
 
-// How often reasoning progress is pushed to the Ask window.
+// The whole state (with the full answer so far) goes over IPC on every
+// update, so streaming updates are batched to about one per frame pair.
+const STREAM_BROADCAST_MS = 40;
+// Reasoning only moves a progress counter: a slower rate is enough.
 const REASONING_BROADCAST_MS = 250;
 
+const MAX_HISTORY_TURNS = 30;
+
+const initialState = () => ({
+    isVisible: false,
+    isLoading: false,
+    isStreaming: false,
+    currentQuestion: '',
+    currentResponse: '',
+    showTextInput: true,
+    reasoningChars: 0,
+});
+
 /**
- * @class
- * @description
+ * Splits an OpenAI-style SSE byte stream into the JSON payloads of its
+ * "data:" lines. A network chunk can end in the middle of a line or of a
+ * multi-byte UTF-8 character (any Cyrillic letter), so both are buffered.
+ * @returns {{push(bytes: Uint8Array): Array<string>}}
  */
+function createSseParser() {
+    const decoder = new TextDecoder();
+    let pending = '';
+    return {
+        push(bytes) {
+            pending += decoder.decode(bytes, { stream: true });
+            const lines = pending.split('\n');
+            pending = lines.pop();
+            const payloads = [];
+            for (const raw of lines) {
+                const line = raw.trim();
+                if (line.startsWith('data:')) payloads.push(line.slice(5).trim());
+            }
+            return payloads;
+        },
+    };
+}
+
+function isMultimodalError(error) {
+    const message = error?.message?.toLowerCase() || '';
+    return ['vision', 'image', 'multimodal', 'unsupported', 'not supported', 'invalid', '400'].some(s => message.includes(s));
+}
+
 class AskService {
     constructor() {
         this.abortController = null;
-        this.state = {
-            isVisible: false,
-            isLoading: false,
-            isStreaming: false,
-            currentQuestion: '',
-            currentResponse: '',
-            showTextInput: true,
-            reasoningChars: 0,
-        };
-        console.log('[AskService] Service instance created.');
+        // 'user' (typed, clicked or the shortcut) or 'auto' (live analysis).
+        this.requestSource = null;
+        this.state = initialState();
+        this.broadcastTimer = null;
+        this.lastBroadcast = 0;
+    }
+
+    _askWindow() {
+        const win = getWindowPool()?.get('ask');
+        return win && !win.isDestroyed() ? win : null;
     }
 
     _broadcastState() {
-        const askWindow = getWindowPool()?.get('ask');
-        if (askWindow && !askWindow.isDestroyed()) {
-            askWindow.webContents.send('ask:stateUpdate', this.state);
+        this._cancelScheduledBroadcast();
+        this.lastBroadcast = Date.now();
+        this._askWindow()?.webContents.send('ask:stateUpdate', this.state);
+    }
+
+    /** Broadcasts at most once per `intervalMs`, always delivering the latest state. */
+    _scheduleBroadcast(intervalMs) {
+        if (this.broadcastTimer) return;
+        const wait = this.lastBroadcast + intervalMs - Date.now();
+        if (wait <= 0) {
+            this._broadcastState();
+        } else {
+            this.broadcastTimer = setTimeout(() => {
+                this.broadcastTimer = null;
+                this._broadcastState();
+            }, wait);
         }
     }
 
-    async toggleAskButton(inputScreenOnly = false) {
-        const askWindow = getWindowPool()?.get('ask');
+    _cancelScheduledBroadcast() {
+        if (this.broadcastTimer) {
+            clearTimeout(this.broadcastTimer);
+            this.broadcastTimer = null;
+        }
+    }
 
-        let shouldSendScreenOnly = false;
-        if (inputScreenOnly && this.state.showTextInput && askWindow && askWindow.isVisible()) {
-            shouldSendScreenOnly = true;
+    /** Whether a question the user asked is still being answered (auto answers must not replace it). */
+    isAnsweringUser() {
+        return this.requestSource === 'user' && (this.state.isLoading || this.state.isStreaming);
+    }
+
+    async toggleAskButton(inputScreenOnly = false) {
+        const askWindow = this._askWindow();
+        const isVisible = !!askWindow?.isVisible();
+
+        if (inputScreenOnly && this.state.showTextInput && isVisible) {
             await this.sendMessage('', []);
             return;
         }
 
-        const hasContent = this.state.isLoading || this.state.isStreaming || (this.state.currentResponse && this.state.currentResponse.length > 0);
-
-        if (askWindow && askWindow.isVisible() && hasContent) {
+        const hasContent = this.state.isLoading || this.state.isStreaming || !!this.state.currentResponse;
+        if (isVisible && hasContent) {
             this.state.showTextInput = !this.state.showTextInput;
             this._broadcastState();
-        } else {
-            if (askWindow && askWindow.isVisible()) {
-                internalBridge.emit('window:requestVisibility', { name: 'ask', visible: false });
-                this.state.isVisible = false;
-            } else {
-                console.log('[AskService] Showing hidden Ask window');
-                internalBridge.emit('window:requestVisibility', { name: 'ask', visible: true });
-                this.state.isVisible = true;
-            }
-            if (this.state.isVisible) {
-                this.state.showTextInput = true;
-                this._broadcastState();
-            }
+            return;
+        }
+
+        internalBridge.emit('window:requestVisibility', { name: 'ask', visible: !isVisible });
+        this.state.isVisible = !isVisible;
+        if (this.state.isVisible) {
+            this.state.showTextInput = true;
+            this._broadcastState();
         }
     }
 
-    async closeAskWindow () {
-            if (this.abortController) {
-                this.abortController.abort('Window closed by user');
-                this.abortController = null;
-            }
-    
-            this.state = {
-                isVisible      : false,
-                isLoading      : false,
-                isStreaming    : false,
-                currentQuestion: '',
-                currentResponse: '',
-                showTextInput  : true,
-                reasoningChars : 0,
-            };
-            this._broadcastState();
-    
-            internalBridge.emit('window:requestVisibility', { name: 'ask', visible: false });
-    
-            return { success: true };
+    async closeAskWindow() {
+        if (this.abortController) {
+            this.abortController.abort('Window closed by user');
+            this.abortController = null;
         }
-    
+        this.requestSource = null;
+        this.state = initialState();
+        this._broadcastState();
+        internalBridge.emit('window:requestVisibility', { name: 'ask', visible: false });
+        return { success: true };
+    }
 
-    /**
-     * 
-     * @param {string[]} conversationTexts
-     * @returns {string}
-     * @private
-     */
     _formatConversationForPrompt(conversationTexts) {
         if (!conversationTexts || conversationTexts.length === 0) {
             return 'No conversation history available.';
         }
-        return conversationTexts.slice(-30).join('\n');
+        return conversationTexts.slice(-MAX_HISTORY_TURNS).join('\n');
     }
 
     /**
-     * 
+     * Answers in the Ask window, replacing (aborting) any answer in progress.
      * @param {string} userPrompt
-     * @returns {Promise<{success: boolean, response?: string, error?: string}>}
+     * @param {string[]} conversationHistoryRaw live transcript lines
+     * @param {{source?: 'user'|'auto'}} [options]
+     * @returns {Promise<{success: boolean, aborted?: boolean, error?: string}>}
      */
-    async sendMessage(userPrompt, conversationHistoryRaw=[]) {
+    async sendMessage(userPrompt, conversationHistoryRaw = [], { source = 'user' } = {}) {
+        const prompt = (userPrompt || '').trim();
         internalBridge.emit('window:requestVisibility', { name: 'ask', visible: true });
         this.state = {
             ...this.state,
@@ -139,160 +183,117 @@ class AskService {
         };
         this._broadcastState();
 
-        if (this.abortController) {
-            this.abortController.abort('New request received.');
-        }
+        this.abortController?.abort('New request received.');
         this.abortController = new AbortController();
+        this.requestSource = source;
         const { signal } = this.abortController;
 
-
-        let sessionId;
-
         try {
-            console.log(`[AskService] 🤖 Processing message: ${userPrompt.substring(0, 50)}...`);
-
-            sessionId = await sessionRepository.getOrCreateActive('ask');
-            await askRepository.addAiMessage({ sessionId, role: 'user', content: userPrompt.trim() });
-            console.log(`[AskService] DB: Saved user prompt to session ${sessionId}`);
-            
             const modelInfo = await modelStateService.getCurrentModelInfo('llm');
             if (!modelInfo || !modelInfo.apiKey) {
                 throw new Error('AI model or API key not configured.');
             }
-            console.log(`[AskService] Using model: ${modelInfo.model} for provider: ${modelInfo.provider}`);
 
-            const screenshotResult = await captureScreenshot({ quality: 'medium' });
-            const screenshotBase64 = screenshotResult.success ? screenshotResult.base64 : null;
+            // Independent lookups run together: the screenshot alone takes a
+            // few hundred ms, all of it before the first token.
+            const settingsService = getSettingsService();
+            const [sessionId, screenshotBase64, language, think] = await Promise.all([
+                sessionRepository.getOrCreateActive('ask'),
+                isTextOnly(modelInfo.model) ? null : captureScreenshot().then(r => (r.success ? r.base64 : null)),
+                settingsService.getSttLanguageSetting(),
+                settingsService.getAskThinkingSetting(),
+            ]);
+            await askRepository.addAiMessage({ sessionId, role: 'user', content: prompt });
 
-            const conversationHistory = this._formatConversationForPrompt(conversationHistoryRaw);
-
-            // Lazy-required: settingsService pulls in the window manager.
-            const settingsService = require('../settings/settingsService');
-            const language = await settingsService.getSttLanguageSetting();
             const systemPrompt =
-                getSystemPrompt('pickle_glass_analysis', conversationHistory, false) +
+                getSystemPrompt('pickle_glass_analysis', this._formatConversationForPrompt(conversationHistoryRaw), false) +
                 (ANSWER_LANGUAGE_RULES[language] ? `\n\n${ANSWER_LANGUAGE_RULES[language]}` : '');
-
-            const messages = [
+            const requestText = `User Request: ${prompt}`;
+            const textMessages = [
+                { role: 'system', content: systemPrompt },
+                { role: 'user', content: requestText },
+            ];
+            const imageMessages = screenshotBase64 && [
                 { role: 'system', content: systemPrompt },
                 {
                     role: 'user',
                     content: [
-                        { type: 'text', text: `User Request: ${userPrompt.trim()}` },
+                        { type: 'text', text: requestText },
+                        { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${screenshotBase64}` } },
                     ],
                 },
             ];
-
-            if (screenshotBase64) {
-                messages[1].content.push({
-                    type: 'image_url',
-                    image_url: { url: `data:image/jpeg;base64,${screenshotBase64}` },
-                });
-            }
-            
-            const think = await settingsService.getAskThinkingSetting();
 
             const streamingLLM = createStreamingLLM(modelInfo.provider, {
                 apiKey: modelInfo.apiKey,
                 model: modelInfo.model,
                 temperature: 0.7,
-                // Reasoning tokens count against this limit, so leave room for
-                // the answer when thinking is on.
+                // Reasoning tokens count against this limit: leave room for the answer.
                 maxTokens: think ? 4096 : 2048,
                 think,
                 usePortkey: modelInfo.provider === 'openai-glass',
                 portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
             });
 
+            const stream = messages => this._streamAnswer(streamingLLM, messages, sessionId, signal);
+            if (!imageMessages) return await stream(textMessages);
             try {
-                const response = await streamingLLM.streamChat(messages);
-                const askWin = getWindowPool()?.get('ask');
-
-                if (!askWin || askWin.isDestroyed()) {
-                    console.error("[AskService] Ask window is not available to send stream to.");
-                    response.body.getReader().cancel();
-                    return { success: false, error: 'Ask window is not available.' };
-                }
-
-                const reader = response.body.getReader();
-                signal.addEventListener('abort', () => {
-                    console.log(`[AskService] Aborting stream reader. Reason: ${signal.reason}`);
-                    reader.cancel(signal.reason).catch(() => { /* 이미 취소된 경우의 오류는 무시 */ });
-                });
-
-                await this._processStream(reader, askWin, sessionId, signal);
-                return { success: true };
-
-            } catch (multimodalError) {
-                // 멀티모달 요청이 실패했고 스크린샷이 포함되어 있다면 텍스트만으로 재시도
-                if (screenshotBase64 && this._isMultimodalError(multimodalError)) {
-                    console.log(`[AskService] Multimodal request failed, retrying with text-only: ${multimodalError.message}`);
-                    
-                    // 텍스트만으로 메시지 재구성
-                    const textOnlyMessages = [
-                        { role: 'system', content: systemPrompt },
-                        {
-                            role: 'user',
-                            content: `User Request: ${userPrompt.trim()}`
-                        }
-                    ];
-
-                    const fallbackResponse = await streamingLLM.streamChat(textOnlyMessages);
-                    const askWin = getWindowPool()?.get('ask');
-
-                    if (!askWin || askWin.isDestroyed()) {
-                        console.error("[AskService] Ask window is not available for fallback response.");
-                        fallbackResponse.body.getReader().cancel();
-                        return { success: false, error: 'Ask window is not available.' };
-                    }
-
-                    const fallbackReader = fallbackResponse.body.getReader();
-                    signal.addEventListener('abort', () => {
-                        console.log(`[AskService] Aborting fallback stream reader. Reason: ${signal.reason}`);
-                        fallbackReader.cancel(signal.reason).catch(() => {});
-                    });
-
-                    await this._processStream(fallbackReader, askWin, sessionId, signal);
-                    return { success: true };
-                } else {
-                    // 다른 종류의 에러이거나 스크린샷이 없었다면 그대로 throw
-                    throw multimodalError;
-                }
+                return await stream(imageMessages);
+            } catch (error) {
+                if (signal.aborted || !isMultimodalError(error)) throw error;
+                console.warn(`[AskService] ${modelInfo.model} rejected the screenshot, answering text-only: ${error.message}`);
+                markTextOnly(modelInfo.model);
+                return await stream(textMessages);
             }
-
         } catch (error) {
+            // A replaced request must not reset the window the newer one owns.
+            if (signal.aborted) return { success: false, aborted: true };
             console.error('[AskService] Error during message processing:', error);
-            this.state = {
-                ...this.state,
-                isLoading: false,
-                isStreaming: false,
-                showTextInput: true,
-            };
+            this.state = { ...this.state, isLoading: false, isStreaming: false, showTextInput: true };
             this._broadcastState();
-
-            const askWin = getWindowPool()?.get('ask');
-            if (askWin && !askWin.isDestroyed()) {
-                const streamError = error.message || 'Unknown error occurred';
-                askWin.webContents.send('ask-response-stream-error', { error: streamError });
-            }
-
+            this._askWindow()?.webContents.send('ask-response-stream-error', { error: error.message || 'Unknown error occurred' });
             return { success: false, error: error.message };
         }
     }
 
+    async _streamAnswer(streamingLLM, messages, sessionId, signal) {
+        // A newer request may have replaced this one while the context was gathered.
+        if (signal.aborted) return { success: false, aborted: true };
+
+        const response = await streamingLLM.streamChat(messages);
+        const askWin = this._askWindow();
+        if (!askWin) {
+            response.body.getReader().cancel().catch(() => {});
+            return { success: false, error: 'Ask window is not available.' };
+        }
+        const reader = this._readerUnlessAborted(response, signal);
+        if (!reader) return { success: false, aborted: true };
+
+        await this._processStream(reader, askWin, sessionId, signal);
+        return { success: true };
+    }
+
     /**
-     * 
-     * @param {ReadableStreamDefaultReader} reader
-     * @param {BrowserWindow} askWin
-     * @param {number} sessionId 
-     * @param {AbortSignal} signal
-     * @returns {Promise<void>}
-     * @private
+     * Gets the stream reader and ties it to the request's abort signal. The
+     * signal may already have fired while the request was starting; an
+     * 'abort' listener added now would never run, so cancel right away. The
+     * cancel also closes the HTTP stream, so the model stops generating.
+     * @returns {ReadableStreamDefaultReader|null} null if already aborted
      */
+    _readerUnlessAborted(response, signal) {
+        const reader = response.body.getReader();
+        const cancel = () => reader.cancel(signal.reason).catch(() => {});
+        if (signal.aborted) {
+            cancel();
+            return null;
+        }
+        signal.addEventListener('abort', cancel, { once: true });
+        return reader;
+    }
+
     async _processStream(reader, askWin, sessionId, signal) {
-        const decoder = new TextDecoder();
+        const parser = createSseParser();
         let fullResponse = '';
-        let lastReasoningBroadcast = 0;
 
         try {
             // isLoading stays on until the first answer token: a reasoning model
@@ -302,85 +303,56 @@ class AskService {
             this._broadcastState();
             while (true) {
                 const { done, value } = await reader.read();
-                if (done) break;
+                if (done || signal.aborted) break;
 
-                const chunk = decoder.decode(value);
-                const lines = chunk.split('\n').filter(line => line.trim() !== '');
-
-                for (const line of lines) {
-                    if (line.startsWith('data: ')) {
-                        const data = line.substring(6);
-                        if (data === '[DONE]') {
-                            return; 
-                        }
-                        try {
-                            const json = JSON.parse(data);
-                            const delta = json.choices[0]?.delta || {};
-                            if (delta.reasoning) {
-                                this.state.reasoningChars += delta.reasoning.length;
-                                const now = Date.now();
-                                if (now - lastReasoningBroadcast >= REASONING_BROADCAST_MS) {
-                                    lastReasoningBroadcast = now;
-                                    this._broadcastState();
-                                }
-                            }
-                            const token = delta.content || '';
-                            if (token) {
-                                fullResponse += token;
-                                this.state.isLoading = false;
-                                this.state.currentResponse = fullResponse;
-                                this._broadcastState();
-                            }
-                        } catch (error) {
-                        }
+                for (const data of parser.push(value)) {
+                    if (data === '[DONE]') return;
+                    let delta;
+                    try {
+                        delta = JSON.parse(data).choices?.[0]?.delta || {};
+                    } catch {
+                        continue;
+                    }
+                    if (delta.reasoning) {
+                        this.state.reasoningChars += delta.reasoning.length;
+                        this._scheduleBroadcast(REASONING_BROADCAST_MS);
+                    }
+                    if (delta.content) {
+                        fullResponse += delta.content;
+                        this.state.isLoading = false;
+                        this.state.currentResponse = fullResponse;
+                        this._scheduleBroadcast(STREAM_BROADCAST_MS);
                     }
                 }
             }
         } catch (streamError) {
-            if (signal.aborted) {
-                console.log(`[AskService] Stream reading was intentionally cancelled. Reason: ${signal.reason}`);
-            } else {
+            if (!signal.aborted) {
                 console.error('[AskService] Error while processing stream:', streamError);
                 if (askWin && !askWin.isDestroyed()) {
                     askWin.webContents.send('ask-response-stream-error', { error: streamError.message });
                 }
             }
         } finally {
-            this.state.isLoading = false;
-            this.state.isStreaming = false;
-            this.state.currentResponse = fullResponse;
-            this._broadcastState();
+            // Once replaced, the window shows the newer request: leave it alone.
+            if (!signal.aborted) {
+                this.state.isLoading = false;
+                this.state.isStreaming = false;
+                this.state.currentResponse = fullResponse;
+                this._broadcastState();
+            }
             if (fullResponse) {
-                 try {
+                try {
                     await askRepository.addAiMessage({ sessionId, role: 'assistant', content: fullResponse });
-                    console.log(`[AskService] DB: Saved partial or full assistant response to session ${sessionId} after stream ended.`);
-                } catch(dbError) {
-                    console.error("[AskService] DB: Failed to save assistant response after stream ended:", dbError);
+                } catch (dbError) {
+                    console.error('[AskService] Failed to save the assistant response:', dbError);
                 }
             }
         }
     }
-
-    /**
-     * 멀티모달 관련 에러인지 판단
-     * @private
-     */
-    _isMultimodalError(error) {
-        const errorMessage = error.message?.toLowerCase() || '';
-        return (
-            errorMessage.includes('vision') ||
-            errorMessage.includes('image') ||
-            errorMessage.includes('multimodal') ||
-            errorMessage.includes('unsupported') ||
-            errorMessage.includes('image_url') ||
-            errorMessage.includes('400') ||  // Bad Request often for unsupported features
-            errorMessage.includes('invalid') ||
-            errorMessage.includes('not supported')
-        );
-    }
-
 }
 
 const askService = new AskService();
 
 module.exports = askService;
+// Exported for tests.
+module.exports.createSseParser = createSseParser;

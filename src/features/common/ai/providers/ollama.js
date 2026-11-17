@@ -1,4 +1,4 @@
-const http = require('http');
+const { StringDecoder } = require('string_decoder');
 const fetch = require('node-fetch');
 
 // Request Queue System for Ollama API (only for non-streaming requests)
@@ -336,9 +336,12 @@ function ollamaStreamSource(body) {
                 if (!finished) controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
             };
 
+            // A chunk can end inside a multi-byte character (any Cyrillic letter):
+            // StringDecoder holds the partial bytes until the rest arrives.
+            const decoder = new StringDecoder('utf8');
             body.on('data', chunk => {
                 if (finished) return;
-                buffer += chunk.toString();
+                buffer += decoder.write(chunk);
                 const lines = buffer.split('\n');
                 buffer = lines.pop() || '';
 

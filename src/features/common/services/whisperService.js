@@ -13,6 +13,8 @@ const execAsync = promisify(exec);
 
 const fsPromises = fs.promises;
 
+const TRANSCRIPTION_LOG_MAX_BYTES = 5 * 1024 * 1024;
+
 class WhisperService extends EventEmitter {
     constructor() {
         super();
@@ -282,6 +284,7 @@ class WhisperService extends EventEmitter {
             
             this.modelsDir = path.join(whisperDir, 'models');
             this.tempDir = path.join(whisperDir, 'temp');
+            this.logsDir = path.join(whisperDir, 'logs');
             
             // Windows에서는 .exe 확장자 필요
             const platform = this.getPlatform();
@@ -289,8 +292,11 @@ class WhisperService extends EventEmitter {
             this.whisperPath = path.join(whisperDir, 'bin', whisperExecutable);
 
             await this.ensureDirectories();
+            // No session exists before initialization, so every utterance file
+            // still in temp/ is a leftover (crash, killed run, older builds).
+            await this.sweepTempDir();
             await this.ensureWhisperBinary();
-            
+
             this.installState.isInitialized = true;
             console.log('[WhisperService] Initialized successfully');
         } catch (error) {
@@ -307,7 +313,44 @@ class WhisperService extends EventEmitter {
     async ensureDirectories() {
         await fsPromises.mkdir(this.modelsDir, { recursive: true });
         await fsPromises.mkdir(this.tempDir, { recursive: true });
+        await fsPromises.mkdir(this.logsDir, { recursive: true });
         await fsPromises.mkdir(path.dirname(this.whisperPath), { recursive: true });
+    }
+
+    /** Deletes per-utterance files (audio_*) left in temp/; other files are kept. */
+    async sweepTempDir() {
+        let names;
+        try {
+            names = await fsPromises.readdir(this.tempDir);
+        } catch {
+            return 0;
+        }
+        const leftovers = names.filter(name => name.startsWith('audio_'));
+        await Promise.all(leftovers.map(name => fsPromises.unlink(path.join(this.tempDir, name)).catch(() => {})));
+        if (leftovers.length > 0) {
+            console.log(`[WhisperService] Removed ${leftovers.length} leftover temp files`);
+        }
+        return leftovers.length;
+    }
+
+    /**
+     * Appends one whisper run to logs/transcriptions.jsonl for debugging: model,
+     * language, raw output and whether the filters dropped it. The file rotates
+     * to .1 at TRANSCRIPTION_LOG_MAX_BYTES, so at most ~2x that is kept.
+     */
+    async logTranscription(entry) {
+        if (!this.logsDir) return;
+        const file = path.join(this.logsDir, 'transcriptions.jsonl');
+        try {
+            const stat = await fsPromises.stat(file).catch(() => null);
+            if (stat && stat.size >= TRANSCRIPTION_LOG_MAX_BYTES) {
+                await fsPromises.rename(file, `${file}.1`);
+            }
+            const line = JSON.stringify({ ts: new Date().toISOString(), ...entry });
+            await fsPromises.appendFile(file, line + '\n');
+        } catch (error) {
+            console.warn('[WhisperService] Failed to write transcription log:', error.message);
+        }
     }
 
     //  local stt session
@@ -561,10 +604,11 @@ class WhisperService extends EventEmitter {
             return;
         }
 
+        // whisper-cli appends its extension to the input name ("x.wav.txt").
         const filesToCleanup = [
             filePath,
-            filePath.replace('.wav', '.txt'),
-            filePath.replace('.wav', '.json')
+            `${filePath}.txt`,
+            `${filePath}.json`
         ];
 
         for (const file of filesToCleanup) {

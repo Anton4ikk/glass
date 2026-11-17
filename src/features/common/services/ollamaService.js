@@ -4,7 +4,6 @@ const { promisify } = require('util');
 const fetch = require('node-fetch');
 const path = require('path');
 const fs = require('fs').promises;
-const os = require('os');
 const https = require('https');
 const crypto = require('crypto');
 const { app } = require('electron');
@@ -28,7 +27,6 @@ class OllamaService extends EventEmitter {
         };
         
         // 단순화된 요청 관리 (복잡한 큐 제거)
-        this.activeRequest = null;
         this.requestTimeout = 30000; // 30초 타임아웃
         
         // 모델 상태
@@ -124,30 +122,22 @@ class OllamaService extends EventEmitter {
         return 'ollama';
     }
 
-    // === 런타임 관리 (단순화) ===
-    async makeRequest(endpoint, options = {}) {
-        // 서비스 종료 중이면 요청하지 않음
+    /**
+     * fetch against the local Ollama API with a per-request timeout. Ollama
+     * serves concurrent requests itself; the old one-at-a-time lock woke all
+     * waiters at once and handed them the previous request's error.
+     */
+    async makeRequest(endpoint, { timeout = this.requestTimeout, ...options } = {}) {
         if (this.isShuttingDown) {
             throw new Error('Service is shutting down');
         }
-        
-        // 동시 요청 방지 (단순한 잠금)
-        if (this.activeRequest) {
-            await this.activeRequest;
-        }
-
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), this.requestTimeout);
-
-        this.activeRequest = fetch(`${this.baseUrl}${endpoint}`, {
-            ...options,
-            signal: controller.signal
-        }).finally(() => {
+        const timeoutId = setTimeout(() => controller.abort(), timeout);
+        try {
+            return await fetch(`${this.baseUrl}${endpoint}`, { ...options, signal: controller.signal });
+        } finally {
             clearTimeout(timeoutId);
-            this.activeRequest = null;
-        });
-
-        return this.activeRequest;
+        }
     }
 
     async isInstalled() {
@@ -1014,62 +1004,22 @@ class OllamaService extends EventEmitter {
             const response = await this.makeRequest('/api/chat', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                // A cold model load can take longer than an API call.
+                timeout: this.warmupTimeout,
                 body: JSON.stringify({
                     model: modelName,
-                    messages: [
-                        { role: 'user', content: 'Hi' }
-                    ],
+                    messages: [{ role: 'user', content: 'Hi' }],
                     stream: false,
-                    options: {
-                        num_predict: 1, // Minimal response
-                        temperature: 0
-                    }
-                })
+                    options: { num_predict: 1, temperature: 0 },
+                }),
             });
-
+            // A 404/500 used to count as warmed.
+            if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             return true;
         } catch (error) {
-            // Check if it's a 404 error (model not found/installed)
-            if (error.message.includes('HTTP 404') || error.message.includes('Not Found')) {
-                console.log(`[OllamaService] Model ${modelName} not found (404), attempting to install...`);
-                
-                try {
-                    // Try to install the model
-                    await this.pullModel(modelName);
-                    console.log(`[OllamaService] Successfully installed model ${modelName}, retrying warm-up...`);
-                    
-                    // Update database to reflect installation
-                    await ollamaModelRepository.updateInstallStatus(modelName, true, false);
-                    
-                    // Retry warm-up after installation
-                    const retryResponse = await this.makeRequest('/api/chat', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            model: modelName,
-                            messages: [
-                                { role: 'user', content: 'Hi' }
-                            ],
-                            stream: false,
-                            options: {
-                                num_predict: 1,
-                                temperature: 0
-                            }
-                        })
-                    });
-                    
-                    console.log(`[OllamaService] Successfully warmed up model ${modelName} after installation`);
-                    return true;
-                    
-                } catch (installError) {
-                    console.error(`[OllamaService] Failed to auto-install model ${modelName}:`, installError.message);
-                    await ollamaModelRepository.updateInstallStatus(modelName, false, false);
-                    return false;
-                }
-            } else {
-                console.error(`[OllamaService] Failed to warm up model ${modelName}:`, error.message);
-                return false;
-            }
+            // A missing model is not pulled here: that is a multi-GB download the user starts in Settings.
+            console.error(`[OllamaService] Failed to warm up model ${modelName}:`, error.message);
+            return false;
         }
     }
 

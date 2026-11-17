@@ -92,28 +92,16 @@ module.exports = {
     ipcMain.handle('ask:closeAskWindow',  async () => await askService.closeAskWindow());
     
     // Listen
-    let _micAudioCount = 0;
-    ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) => {
-        _micAudioCount++;
-        if (_micAudioCount <= 3 || _micAudioCount % 50 === 0) console.log(`[Bridge] sendMicAudio #${_micAudioCount}`);
-        return await listenService.handleSendMicAudioContent(data, mimeType);
-    });
-    let _sysAudioCount = 0;
-    ipcMain.handle('listen:sendSystemAudio', async (event, { data, mimeType }) => {
-        _sysAudioCount++;
-        if (_sysAudioCount <= 3 || _sysAudioCount % 50 === 0) console.log(`[Bridge] sendSystemAudio #${_sysAudioCount}`);
-        const result = await listenService.sttService.sendSystemAudioContent(data, mimeType);
-        if(result.success) {
-            listenService.sendToRenderer('system-audio-data', { data });
-        }
-        return result;
-    });
+    ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) =>
+        await listenService.handleSendMicAudioContent(data, mimeType));
+    // Windows loopback audio; the echo back to the renderer is the AEC reference.
+    ipcMain.handle('listen:sendSystemAudio', async (event, { data, mimeType }) =>
+        await listenService.sttService.handleSendSystemAudioContent(data, mimeType));
     ipcMain.on('listen:rendererLog', (event, msg) => {
         console.log('[RendererLog]', msg);
     });
     ipcMain.handle('listen:startMacosSystemAudio', async () => await listenService.handleStartMacosAudio());
     ipcMain.handle('listen:stopMacosSystemAudio', async () => await listenService.handleStopMacosAudio());
-    ipcMain.handle('update-google-search-setting', async (event, enabled) => await listenService.handleUpdateGoogleSearchSetting(enabled));
     ipcMain.handle('listen:isSessionActive', async () => await listenService.isSessionActive());
     ipcMain.handle('listen:changeSession', async (event, listenButtonText) => {
       console.log('[FeatureBridge] listen:changeSession from mainheader', listenButtonText);

@@ -103,9 +103,19 @@ class ModelStateService extends EventEmitter {
 
     async handleLocalAIStateChange(service, state) {
         console.log(`[ModelStateService] LocalAI state changed: ${service}`, state);
-        if (!state.installed || !state.running) {
-            const types = service === 'ollama' ? ['llm'] : service === 'whisper' ? ['stt'] : [];
-            await this._autoSelectAvailableModels(types);
+        if (service === 'whisper') {
+            // Whisper's `running` is only a lazy-init flag and `installed` is a
+            // PATH lookup that fails when the app is launched from Finder, so
+            // neither means the selection is unusable. Forcing a re-pick here
+            // replaced the user's model with the first installed one (tiny)
+            // on every 30 s sync. Only re-pick when the selected weights are gone.
+            await this._autoSelectAvailableModels([]);
+        } else if (!state.installed || !state.running) {
+            // Re-pick only when the selection actually depends on Ollama; a
+            // stopped Ollama used to replace a chosen cloud model every 30 s.
+            const { selectedModels } = await this.getLiveState();
+            const usesOllama = service === 'ollama' && this.getProviderForModel(selectedModels.llm, 'llm') === 'ollama';
+            await this._autoSelectAvailableModels(usesOllama ? ['llm'] : []);
         }
         this.emit('state-updated', await this.getLiveState());
     }
@@ -141,7 +151,10 @@ class ModelStateService extends EventEmitter {
                 const provider = this.getProviderForModel(currentModelId, type);
                 const apiKey = apiKeys[provider];
                 if (provider && apiKey) {
-                    isCurrentModelValid = true;
+                    // A Whisper selection is only usable while its weights are on disk.
+                    isCurrentModelValid = provider === 'whisper'
+                        ? (await this.getAvailableModels(type)).some(m => m.id === currentModelId)
+                        : true;
                 }
             }
 
@@ -246,7 +259,8 @@ class ModelStateService extends EventEmitter {
         const setting = await providerSettingsRepository.getByProvider(provider);
         if (setting && setting.api_key) {
             await providerSettingsRepository.upsert(provider, { ...setting, api_key: null });
-            await this._autoSelectAvailableModels(['llm', 'stt']);
+            // Only selections whose key just went away are invalid now.
+            await this._autoSelectAvailableModels([]);
             this.emit('state-updated', await this.getLiveState());
             this.emit('settings-updated');
             return true;

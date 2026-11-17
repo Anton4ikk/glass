@@ -1,7 +1,6 @@
-const { collection, doc, setDoc, getDoc, Timestamp } = require('firebase/firestore');
+const { doc, setDoc, getDoc, Timestamp } = require('firebase/firestore');
 const { getFirestoreInstance } = require('../../../common/services/firebaseClient');
 const { createEncryptedConverter } = require('../../../common/repositories/firestoreConverter');
-const encryptionService = require('../../../common/services/encryptionService');
 
 const fieldsToEncrypt = ['tldr', 'text', 'bullet_json', 'action_json'];
 const summaryConverter = createEncryptedConverter(fieldsToEncrypt);

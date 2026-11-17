@@ -1,50 +1,57 @@
-const { BrowserWindow } = require('electron');
 const { spawn } = require('child_process');
 const { createSTT } = require('../../common/ai/factory');
 const modelStateService = require('../../common/services/modelStateService');
 
+// A turn ends after this much silence from the STT provider.
 const COMPLETION_DEBOUNCE_MS = 2000;
+// Keep-alives stay well below the 2-5 min idle timeout of provider websockets.
+const KEEP_ALIVE_INTERVAL_MS = 60 * 1000;
+// Sessions are recreated before the 30-minute hard limit some providers enforce.
+const SESSION_RENEW_INTERVAL_MS = 20 * 60 * 1000;
+// Old and new sockets run in parallel this long, so no audio is lost at the swap.
+const SOCKET_OVERLAP_MS = 2 * 1000;
 
-// ── New heartbeat / renewal constants ────────────────────────────────────────────
-// Interval to send low-cost keep-alive messages so the remote service does not
-// treat the connection as idle. One minute is safely below the typical 2-5 min
-// idle timeout window seen on provider websockets.
-const KEEP_ALIVE_INTERVAL_MS = 60 * 1000;         // 1 minute
+const WHISPER_NOISE = ['[BLANK_AUDIO]', '[INAUDIBLE]', '[MUSIC]', '[SOUND]', '[NOISE]', '(BLANK_AUDIO)', '(INAUDIBLE)', '(MUSIC)', '(SOUND)', '(NOISE)'];
 
-// Interval after which we pro-actively tear down and recreate the STT sessions
-// to dodge the 30-minute hard timeout enforced by some providers. 20 minutes
-// gives a 10-minute safety buffer.
-const SESSION_RENEW_INTERVAL_MS = 20 * 60 * 1000; // 20 minutes
+// SystemAudioDump writes 24 kHz 16-bit stereo PCM; STT gets 100 ms mono chunks.
+const SYSTEM_AUDIO_SAMPLE_RATE = 24000;
+const SYSTEM_AUDIO_CHUNK_BYTES = SYSTEM_AUDIO_SAMPLE_RATE * 2 /* bytes */ * 2 /* channels */ * 0.1;
 
-// Duration to allow the old and new sockets to run in parallel so we don't
-// miss any packets at the exact swap moment.
-const SOCKET_OVERLAP_MS = 2 * 1000; // 2 seconds
+// "Me" is the microphone, "Them" the system audio.
+const SPEAKERS = ['Me', 'Them'];
+const newTurn = () => ({ buffer: '', utterance: '', timer: null });
+
+/** Wraps base64 PCM in the shape each provider's sendRealtimeInput expects. */
+function toProviderPayload(provider, base64Data, mimeType) {
+    if (provider === 'gemini') return { audio: { data: base64Data, mimeType: mimeType || 'audio/pcm;rate=24000' } };
+    if (provider === 'deepgram') return Buffer.from(base64Data, 'base64');
+    return base64Data;
+}
+
+/** Keeps the left channel of 16-bit interleaved stereo PCM. */
+function convertStereoToMono(stereoBuffer) {
+    const samples = stereoBuffer.length / 4;
+    const mono = Buffer.alloc(samples * 2);
+    for (let i = 0; i < samples; i++) {
+        mono.writeInt16LE(stereoBuffer.readInt16LE(i * 4), i * 2);
+    }
+    return mono;
+}
 
 class SttService {
     constructor() {
-        this.mySttSession = null;
-        this.theirSttSession = null;
-        this.myCurrentUtterance = '';
-        this.theirCurrentUtterance = '';
-        
-        // Turn-completion debouncing
-        this.myCompletionBuffer = '';
-        this.theirCompletionBuffer = '';
-        this.myCompletionTimer = null;
-        this.theirCompletionTimer = null;
-        
-        // System audio capture
+        this.sessions = { Me: null, Them: null };
+        this.turns = { Me: newTurn(), Them: newTurn() };
         this.systemAudioProc = null;
-
-        // Keep-alive / renewal timers
         this.keepAliveInterval = null;
         this.sessionRenewTimeout = null;
+        // Bumped by closeSessions(), so sessions that finish connecting after
+        // Stop (an in-flight init or renewal) are closed instead of leaking.
+        this.generation = 0;
+        this.modelInfo = null;
 
-        // Callbacks
         this.onTranscriptionComplete = null;
         this.onStatusUpdate = null;
-
-        this.modelInfo = null; 
     }
 
     setCallbacks({ onTranscriptionComplete, onStatusUpdate }) {
@@ -52,103 +59,117 @@ class SttService {
         this.onStatusUpdate = onStatusUpdate;
     }
 
+    // Listen events go to the listen window only (the Ask window would react to them too).
     sendToRenderer(channel, data) {
-        // Listen 관련 이벤트는 Listen 윈도우에만 전송 (Ask 윈도우 충돌 방지)
         const { windowPool } = require('../../../window/windowManager');
         const listenWindow = windowPool?.get('listen');
-        
         if (listenWindow && !listenWindow.isDestroyed()) {
             listenWindow.webContents.send(channel, data);
         }
     }
 
-    async handleSendSystemAudioContent(data, mimeType) {
-        try {
-            await this.sendSystemAudioContent(data, mimeType);
-            this.sendToRenderer('system-audio-data', { data });
-            return { success: true };
-        } catch (error) {
-            console.error('Error sending system audio:', error);
-            return { success: false, error: error.message };
-        }
+    sendPartial(speaker, text) {
+        this.sendToRenderer('stt-update', { speaker, text, isPartial: true, isFinal: false, timestamp: Date.now() });
     }
 
-    flushMyCompletion() {
-        const finalText = (this.myCompletionBuffer + this.myCurrentUtterance).trim();
+    /** Ends the speaker's turn. Returns the save promise so closeSessions() can wait for it. */
+    flushCompletion(speaker) {
+        const turn = this.turns[speaker];
+        if (turn.timer) {
+            clearTimeout(turn.timer);
+            turn.timer = null;
+        }
+        const finalText = (turn.buffer + turn.utterance).trim();
         if (!this.modelInfo || !finalText) return;
 
-        // Notify completion callback; returned so closeSessions() can wait for the save
-        const saved = this.onTranscriptionComplete ? this.onTranscriptionComplete('Me', finalText) : null;
-        
-        // Send to renderer as final
-        this.sendToRenderer('stt-update', {
-            speaker: 'Me',
-            text: finalText,
-            isPartial: false,
-            isFinal: true,
-            timestamp: Date.now(),
-        });
+        const saved = this.onTranscriptionComplete?.(speaker, finalText);
+        this.sendToRenderer('stt-update', { speaker, text: finalText, isPartial: false, isFinal: true, timestamp: Date.now() });
 
-        this.myCompletionBuffer = '';
-        this.myCompletionTimer = null;
-        this.myCurrentUtterance = '';
-        
-        if (this.onStatusUpdate) {
-            this.onStatusUpdate('Listening...');
-        }
+        turn.buffer = '';
+        turn.utterance = '';
+        this.onStatusUpdate?.('Listening...');
         return saved;
     }
 
-    flushTheirCompletion() {
-        const finalText = (this.theirCompletionBuffer + this.theirCurrentUtterance).trim();
-        if (!this.modelInfo || !finalText) return;
-        
-        // Notify completion callback; returned so closeSessions() can wait for the save
-        const saved = this.onTranscriptionComplete ? this.onTranscriptionComplete('Them', finalText) : null;
-        
-        // Send to renderer as final
-        this.sendToRenderer('stt-update', {
-            speaker: 'Them',
-            text: finalText,
-            isPartial: false,
-            isFinal: true,
-            timestamp: Date.now(),
-        });
+    debounceCompletion(speaker, text) {
+        const turn = this.turns[speaker];
+        // Gemini streams word pieces with their own spacing.
+        const separator = this.modelInfo?.provider === 'gemini' || !turn.buffer ? '' : ' ';
+        turn.buffer += separator + text;
 
-        this.theirCompletionBuffer = '';
-        this.theirCompletionTimer = null;
-        this.theirCurrentUtterance = '';
-        
-        if (this.onStatusUpdate) {
-            this.onStatusUpdate('Listening...');
-        }
-        return saved;
+        if (turn.timer) clearTimeout(turn.timer);
+        turn.timer = setTimeout(() => this.flushCompletion(speaker), COMPLETION_DEBOUNCE_MS);
     }
 
-    debounceMyCompletion(text) {
-        if (this.modelInfo?.provider === 'gemini') {
-            this.myCompletionBuffer += text;
-        } else {
-            this.myCompletionBuffer += (this.myCompletionBuffer ? ' ' : '') + text;
-        }
-
-        if (this.myCompletionTimer) clearTimeout(this.myCompletionTimer);
-        this.myCompletionTimer = setTimeout(() => this.flushMyCompletion(), COMPLETION_DEBOUNCE_MS);
+    /** An interim result means the speaker is still talking: hold the turn open. */
+    holdCompletion(speaker) {
+        const turn = this.turns[speaker];
+        if (turn.timer) clearTimeout(turn.timer);
+        turn.timer = null;
     }
 
-    debounceTheirCompletion(text) {
-        if (this.modelInfo?.provider === 'gemini') {
-            this.theirCompletionBuffer += text;
-        } else {
-            this.theirCompletionBuffer += (this.theirCompletionBuffer ? ' ' : '') + text;
-        }
+    handleMessage(speaker, message) {
+        if (!message || typeof message !== 'object' || !this.modelInfo) return;
+        const turn = this.turns[speaker];
 
-        if (this.theirCompletionTimer) clearTimeout(this.theirCompletionTimer);
-        this.theirCompletionTimer = setTimeout(() => this.flushTheirCompletion(), COMPLETION_DEBOUNCE_MS);
+        switch (this.modelInfo.provider) {
+            case 'whisper': {
+                const text = message.text?.trim();
+                if (!text) return;
+                if (text.length <= 2 || WHISPER_NOISE.some(p => text.includes(p))) return;
+                this.debounceCompletion(speaker, text);
+                // A growing partial; the debounced flush replaces it with the final turn.
+                this.sendPartial(speaker, turn.buffer);
+                return;
+            }
+
+            case 'gemini': {
+                if (message.serverContent?.turnComplete) {
+                    if (turn.timer) this.flushCompletion(speaker);
+                    return;
+                }
+                const chunk = message.serverContent?.inputTranscription?.text;
+                if (!chunk || !chunk.trim() || chunk.trim() === '<noise>') return;
+                this.debounceCompletion(speaker, chunk);
+                this.sendPartial(speaker, turn.buffer);
+                return;
+            }
+
+            case 'deepgram': {
+                const text = message.channel?.alternatives?.[0]?.transcript;
+                if (!text || !text.trim()) return;
+                if (message.is_final) {
+                    turn.utterance = '';
+                    this.debounceCompletion(speaker, text);
+                } else {
+                    this.holdCompletion(speaker);
+                    turn.utterance = text;
+                    this.sendPartial(speaker, `${turn.buffer} ${turn.utterance}`.trim());
+                }
+                return;
+            }
+
+            default: {
+                // OpenAI realtime transcription events.
+                const text = message.transcript || message.delta || message.alternatives?.[0]?.transcript || '';
+                if (message.type === 'conversation.item.input_audio_transcription.delta') {
+                    this.holdCompletion(speaker);
+                    turn.utterance += text;
+                    if (text && !text.includes('vq_lbr_audio_')) {
+                        this.sendPartial(speaker, turn.buffer + (turn.buffer ? ' ' : '') + turn.utterance);
+                    }
+                } else if (message.type === 'conversation.item.input_audio_transcription.completed' && text.trim()) {
+                    turn.utterance = '';
+                    this.debounceCompletion(speaker, text.trim());
+                }
+                if (message.error) console.error(`[SttService] ${speaker} STT session error:`, message.error);
+            }
+        }
     }
 
     async initializeSttSessions(language = 'en') {
         const effectiveLanguage = (process.env.OPENAI_TRANSCRIBE_LANG || language || 'en').trim();
+        const generation = this.generation;
 
         const modelInfo = await modelStateService.getCurrentModelInfo('stt');
         if (!modelInfo || !modelInfo.apiKey) {
@@ -157,483 +178,122 @@ class SttService {
         this.modelInfo = modelInfo;
         console.log(`[SttService] Initializing STT for ${modelInfo.provider} using model ${modelInfo.model}`);
 
-        const handleMyMessage = message => {
-            if (!this.modelInfo) {
-                console.log('[SttService] Ignoring message - session already closed');
-                return;
-            }
-            // console.log('[SttService] handleMyMessage', message);
-            
-            if (this.modelInfo.provider === 'whisper') {
-                // Whisper STT emits 'transcription' events with different structure
-                if (message.text && message.text.trim()) {
-                    const finalText = message.text.trim();
-                    
-                    // Filter out Whisper noise transcriptions
-                    const noisePatterns = [
-                        '[BLANK_AUDIO]',
-                        '[INAUDIBLE]',
-                        '[MUSIC]',
-                        '[SOUND]',
-                        '[NOISE]',
-                        '(BLANK_AUDIO)',
-                        '(INAUDIBLE)',
-                        '(MUSIC)',
-                        '(SOUND)',
-                        '(NOISE)'
-                    ];
-                    
-                    const isNoise = noisePatterns.some(pattern => 
-                        finalText.includes(pattern) || finalText === pattern
-                    );
-                    
-                    
-                    if (!isNoise && finalText.length > 2) {
-                        this.debounceMyCompletion(finalText);
-                        
-                        // Shown as a growing partial; the debounced flush sends the
-                        // final turn and replaces it, so each chunk isn't shown twice.
-                        this.sendToRenderer('stt-update', {
-                            speaker: 'Me',
-                            text: this.myCompletionBuffer,
-                            isPartial: true,
-                            isFinal: false,
-                            timestamp: Date.now(),
-                        });
-                    } else {
-                        console.log(`[Whisper-Me] Filtered noise: "${finalText}"`);
-                    }
-                }
-                return;
-            } else if (this.modelInfo.provider === 'gemini') {
-                if (!message.serverContent?.modelTurn) {
-                    console.log('[Gemini STT - Me]', JSON.stringify(message, null, 2));
-                }
-
-                if (message.serverContent?.turnComplete) {
-                    if (this.myCompletionTimer) {
-                        clearTimeout(this.myCompletionTimer);
-                        this.flushMyCompletion();
-                    }
-                    return;
-                }
-            
-                const transcription = message.serverContent?.inputTranscription;
-                if (!transcription || !transcription.text) return;
-                
-                const textChunk = transcription.text;
-                if (!textChunk.trim() || textChunk.trim() === '<noise>') {
-                    return; // 1. Ignore whitespace-only chunks or noise
-                }
-            
-                this.debounceMyCompletion(textChunk);
-                
-                this.sendToRenderer('stt-update', {
-                    speaker: 'Me',
-                    text: this.myCompletionBuffer,
-                    isPartial: true,
-                    isFinal: false,
-                    timestamp: Date.now(),
-                });
-                
-            // Deepgram 
-            } else if (this.modelInfo.provider === 'deepgram') {
-                const text = message.channel?.alternatives?.[0]?.transcript;
-                if (!text || text.trim().length === 0) return;
-
-                const isFinal = message.is_final;
-                console.log(`[SttService-Me-Deepgram] Received: isFinal=${isFinal}, text="${text}"`);
-
-                if (isFinal) {
-                    // 최종 결과가 도착하면, 현재 진행중인 부분 발화는 비우고
-                    // 최종 텍스트로 debounce를 실행합니다.
-                    this.myCurrentUtterance = ''; 
-                    this.debounceMyCompletion(text); 
-                } else {
-                    // 부분 결과(interim)인 경우, 화면에 실시간으로 업데이트합니다.
-                    if (this.myCompletionTimer) clearTimeout(this.myCompletionTimer);
-                    this.myCompletionTimer = null;
-
-                    this.myCurrentUtterance = text;
-                    
-                    const continuousText = (this.myCompletionBuffer + ' ' + this.myCurrentUtterance).trim();
-
-                    this.sendToRenderer('stt-update', {
-                        speaker: 'Me',
-                        text: continuousText,
-                        isPartial: true,
-                        isFinal: false,
-                        timestamp: Date.now(),
-                    });
-                }
-                
-            } else {
-                const type = message.type;
-                const text = message.transcript || message.delta || (message.alternatives && message.alternatives[0]?.transcript) || '';
-
-                if (type === 'conversation.item.input_audio_transcription.delta') {
-                    if (this.myCompletionTimer) clearTimeout(this.myCompletionTimer);
-                    this.myCompletionTimer = null;
-                    this.myCurrentUtterance += text;
-                    const continuousText = this.myCompletionBuffer + (this.myCompletionBuffer ? ' ' : '') + this.myCurrentUtterance;
-                    if (text && !text.includes('vq_lbr_audio_')) {
-                        this.sendToRenderer('stt-update', {
-                            speaker: 'Me',
-                            text: continuousText,
-                            isPartial: true,
-                            isFinal: false,
-                            timestamp: Date.now(),
-                        });
-                    }
-                } else if (type === 'conversation.item.input_audio_transcription.completed') {
-                    if (text && text.trim()) {
-                        const finalUtteranceText = text.trim();
-                        this.myCurrentUtterance = '';
-                        this.debounceMyCompletion(finalUtteranceText);
-                    }
-                }
-            }
-
-            if (message.error) {
-                console.error('[Me] STT Session Error:', message.error);
-            }
-        };
-
-        const handleTheirMessage = message => {
-            if (!message || typeof message !== 'object') return;
-
-            if (!this.modelInfo) {
-                console.log('[SttService] Ignoring message - session already closed');
-                return;
-            }
-            
-            if (this.modelInfo.provider === 'whisper') {
-                // Whisper STT emits 'transcription' events with different structure
-                if (message.text && message.text.trim()) {
-                    const finalText = message.text.trim();
-                    
-                    // Filter out Whisper noise transcriptions
-                    const noisePatterns = [
-                        '[BLANK_AUDIO]',
-                        '[INAUDIBLE]',
-                        '[MUSIC]',
-                        '[SOUND]',
-                        '[NOISE]',
-                        '(BLANK_AUDIO)',
-                        '(INAUDIBLE)',
-                        '(MUSIC)',
-                        '(SOUND)',
-                        '(NOISE)'
-                    ];
-                    
-                    const isNoise = noisePatterns.some(pattern => 
-                        finalText.includes(pattern) || finalText === pattern
-                    );
-                    
-                    
-                    // Only process if it's not noise, not a false positive, and has meaningful content
-                    if (!isNoise && finalText.length > 2) {
-                        this.debounceTheirCompletion(finalText);
-                        
-                        // Shown as a growing partial; the debounced flush sends the
-                        // final turn and replaces it, so each chunk isn't shown twice.
-                        this.sendToRenderer('stt-update', {
-                            speaker: 'Them',
-                            text: this.theirCompletionBuffer,
-                            isPartial: true,
-                            isFinal: false,
-                            timestamp: Date.now(),
-                        });
-                    } else {
-                        console.log(`[Whisper-Them] Filtered noise: "${finalText}"`);
-                    }
-                }
-                return;
-            } else if (this.modelInfo.provider === 'gemini') {
-                if (!message.serverContent?.modelTurn) {
-                    console.log('[Gemini STT - Them]', JSON.stringify(message, null, 2));
-                }
-
-                if (message.serverContent?.turnComplete) {
-                    if (this.theirCompletionTimer) {
-                        clearTimeout(this.theirCompletionTimer);
-                        this.flushTheirCompletion();
-                    }
-                    return;
-                }
-            
-                const transcription = message.serverContent?.inputTranscription;
-                if (!transcription || !transcription.text) return;
-
-                const textChunk = transcription.text;
-                if (!textChunk.trim() || textChunk.trim() === '<noise>') {
-                    return; // 1. Ignore whitespace-only chunks or noise
-                }
-
-                this.debounceTheirCompletion(textChunk);
-                
-                this.sendToRenderer('stt-update', {
-                    speaker: 'Them',
-                    text: this.theirCompletionBuffer,
-                    isPartial: true,
-                    isFinal: false,
-                    timestamp: Date.now(),
-                });
-
-            // Deepgram
-            } else if (this.modelInfo.provider === 'deepgram') {
-                const text = message.channel?.alternatives?.[0]?.transcript;
-                if (!text || text.trim().length === 0) return;
-
-                const isFinal = message.is_final;
-
-                if (isFinal) {
-                    this.theirCurrentUtterance = ''; 
-                    this.debounceTheirCompletion(text); 
-                } else {
-                    if (this.theirCompletionTimer) clearTimeout(this.theirCompletionTimer);
-                    this.theirCompletionTimer = null;
-
-                    this.theirCurrentUtterance = text;
-                    
-                    const continuousText = (this.theirCompletionBuffer + ' ' + this.theirCurrentUtterance).trim();
-
-                    this.sendToRenderer('stt-update', {
-                        speaker: 'Them',
-                        text: continuousText,
-                        isPartial: true,
-                        isFinal: false,
-                        timestamp: Date.now(),
-                    });
-                }
-
-            } else {
-                const type = message.type;
-                const text = message.transcript || message.delta || (message.alternatives && message.alternatives[0]?.transcript) || '';
-                if (type === 'conversation.item.input_audio_transcription.delta') {
-                    if (this.theirCompletionTimer) clearTimeout(this.theirCompletionTimer);
-                    this.theirCompletionTimer = null;
-                    this.theirCurrentUtterance += text;
-                    const continuousText = this.theirCompletionBuffer + (this.theirCompletionBuffer ? ' ' : '') + this.theirCurrentUtterance;
-                    if (text && !text.includes('vq_lbr_audio_')) {
-                        this.sendToRenderer('stt-update', {
-                            speaker: 'Them',
-                            text: continuousText,
-                            isPartial: true,
-                            isFinal: false,
-                            timestamp: Date.now(),
-                        });
-                    }
-                } else if (type === 'conversation.item.input_audio_transcription.completed') {
-                    if (text && text.trim()) {
-                        const finalUtteranceText = text.trim();
-                        this.theirCurrentUtterance = '';
-                        this.debounceTheirCompletion(finalUtteranceText);
-                    }
-                }
-            }
-            
-            if (message.error) {
-                console.error('[Them] STT Session Error:', message.error);
-            }
-        };
-
-        const mySttConfig = {
+        const optionsFor = speaker => ({
+            apiKey: modelInfo.apiKey,
+            // Cloud providers ignore the model (they use a fixed one); Whisper needs it.
+            model: modelInfo.model,
             language: effectiveLanguage,
+            usePortkey: modelInfo.provider === 'openai-glass',
+            portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
+            // Whisper keeps a separate segmenter per session type.
+            sessionType: speaker === 'Me' ? 'my' : 'their',
             callbacks: {
-                onmessage: handleMyMessage,
-                onerror: error => console.error('My STT session error:', error.message),
-                onclose: event => console.log('My STT session closed:', event.reason),
+                onmessage: message => this.handleMessage(speaker, message),
+                onerror: error => console.error(`[SttService] ${speaker} STT session error:`, error.message),
+                onclose: event => console.log(`[SttService] ${speaker} STT session closed:`, event?.reason),
             },
-        };
-        
-        const theirSttConfig = {
-            language: effectiveLanguage,
-            callbacks: {
-                onmessage: handleTheirMessage,
-                onerror: error => console.error('Their STT session error:', error.message),
-                onclose: event => console.log('Their STT session closed:', event.reason),
-            },
-        };
-        
-        const sttOptions = {
-            apiKey: this.modelInfo.apiKey,
-            language: effectiveLanguage,
-            usePortkey: this.modelInfo.provider === 'openai-glass',
-            portkeyVirtualKey: this.modelInfo.provider === 'openai-glass' ? this.modelInfo.apiKey : undefined,
-        };
+        });
 
-        // Add sessionType for Whisper to distinguish between My and Their sessions
-        const myOptions = { ...sttOptions, callbacks: mySttConfig.callbacks, sessionType: 'my' };
-        const theirOptions = { ...sttOptions, callbacks: theirSttConfig.callbacks, sessionType: 'their' };
+        // allSettled: if one session fails, the other one must still be closed,
+        // or every retry of the caller leaks an open socket (or whisper process).
+        const results = await Promise.allSettled(SPEAKERS.map(speaker => createSTT(modelInfo.provider, optionsFor(speaker))));
+        const created = results.filter(r => r.status === 'fulfilled').map(r => r.value);
+        const failure = results.find(r => r.status === 'rejected');
+        if (failure || generation !== this.generation) {
+            created.forEach(session => Promise.resolve(session?.close?.()).catch(() => {}));
+            if (failure) throw failure.reason;
+            throw new Error('STT sessions were closed while connecting.');
+        }
+        [this.sessions.Me, this.sessions.Them] = created;
 
-        [this.mySttSession, this.theirSttSession] = await Promise.all([
-            createSTT(this.modelInfo.provider, myOptions),
-            createSTT(this.modelInfo.provider, theirOptions),
-        ]);
-
-        console.log('✅ Both STT sessions initialized successfully.');
-
-        // ── Setup keep-alive heart-beats ────────────────────────────────────────
         if (this.keepAliveInterval) clearInterval(this.keepAliveInterval);
-        this.keepAliveInterval = setInterval(() => {
-            this._sendKeepAlive();
-        }, KEEP_ALIVE_INTERVAL_MS);
+        this.keepAliveInterval = setInterval(() => this._sendKeepAlive(), KEEP_ALIVE_INTERVAL_MS);
 
-        // ── Schedule session auto-renewal ───────────────────────────────────────
         if (this.sessionRenewTimeout) clearTimeout(this.sessionRenewTimeout);
-        this.sessionRenewTimeout = setTimeout(async () => {
-            try {
-                console.log('[SttService] Auto-renewing STT sessions…');
-                await this.renewSessions(language);
-            } catch (err) {
-                console.error('[SttService] Failed to renew STT sessions:', err);
-            }
+        this.sessionRenewTimeout = setTimeout(() => {
+            this.renewSessions(language).catch(err => console.error('[SttService] Failed to renew STT sessions:', err));
         }, SESSION_RENEW_INTERVAL_MS);
 
         return true;
     }
 
-    /**
-     * Send a lightweight keep-alive to prevent idle disconnects.
-     * Currently only implemented for OpenAI provider because Gemini's SDK
-     * already performs its own heart-beats.
-     */
+    // Only OpenAI needs it: Gemini's SDK sends its own heartbeats.
     _sendKeepAlive() {
-        if (!this.isSessionActive()) return;
-
-        if (this.modelInfo?.provider === 'openai') {
-            try {
-                this.mySttSession?.keepAlive?.();
-                this.theirSttSession?.keepAlive?.();
-            } catch (err) {
-                console.error('[SttService] keepAlive error:', err.message);
-            }
+        if (!this.isSessionActive() || this.modelInfo?.provider !== 'openai') return;
+        try {
+            this.sessions.Me?.keepAlive?.();
+            this.sessions.Them?.keepAlive?.();
+        } catch (err) {
+            console.error('[SttService] keepAlive error:', err.message);
         }
     }
 
-    /**
-     * Gracefully tears down then recreates the STT sessions. Should be invoked
-     * on a timer to avoid provider-side hard timeouts.
-     */
+    /** Replaces the sessions with fresh ones; audio capture keeps running through the swap. */
     async renewSessions(language = 'en') {
-        if (!this.isSessionActive()) {
-            console.warn('[SttService] renewSessions called but no active session.');
-            return;
-        }
+        if (!this.isSessionActive()) return;
+        const oldSessions = [this.sessions.Me, this.sessions.Them];
 
-        const oldMySession = this.mySttSession;
-        const oldTheirSession = this.theirSttSession;
-
-        console.log('[SttService] Spawning fresh STT sessions in the background…');
-
-        // We reuse initializeSttSessions to create fresh sessions with the same
-        // language and handlers. The method will update the session pointers
-        // and timers, but crucially it does NOT touch the system audio capture
-        // pipeline, so audio continues flowing uninterrupted.
         await this.initializeSttSessions(language);
 
-        // Close the old sessions after a short overlap window.
         setTimeout(() => {
-            try {
-                oldMySession?.close?.();
-                oldTheirSession?.close?.();
-                console.log('[SttService] Old STT sessions closed after hand-off.');
-            } catch (err) {
-                console.error('[SttService] Error closing old STT sessions:', err.message);
+            for (const session of oldSessions) {
+                Promise.resolve(session?.close?.()).catch(err => console.error('[SttService] Error closing old STT session:', err.message));
             }
         }, SOCKET_OVERLAP_MS);
     }
 
+    async sendAudio(speaker, data, mimeType) {
+        const session = this.sessions[speaker];
+        if (!session || !this.modelInfo) {
+            throw new Error(`${speaker} STT session not active`);
+        }
+        await session.sendRealtimeInput(toProviderPayload(this.modelInfo.provider, data, mimeType));
+    }
+
     async sendMicAudioContent(data, mimeType) {
-        // const provider = await this.getAiProvider();
-        // const isGemini = provider === 'gemini';
-        
-        if (!this.mySttSession) {
-            throw new Error('User STT session not active');
-        }
-
-        let modelInfo = this.modelInfo;
-        if (!modelInfo) {
-            console.warn('[SttService] modelInfo not found, fetching on-the-fly as a fallback...');
-            modelInfo = await modelStateService.getCurrentModelInfo('stt');
-        }
-        if (!modelInfo) {
-            throw new Error('STT model info could not be retrieved.');
-        }
-
-        let payload;
-        if (modelInfo.provider === 'gemini') {
-            payload = { audio: { data, mimeType: mimeType || 'audio/pcm;rate=24000' } };
-        } else if (modelInfo.provider === 'deepgram') {
-            payload = Buffer.from(data, 'base64'); 
-        } else {
-            payload = data;
-        }
-        await this.mySttSession.sendRealtimeInput(payload);
+        await this.sendAudio('Me', data, mimeType);
     }
 
     async sendSystemAudioContent(data, mimeType) {
-        if (!this.theirSttSession) {
-            throw new Error('Their STT session not active');
-        }
-
-        let modelInfo = this.modelInfo;
-        if (!modelInfo) {
-            console.warn('[SttService] modelInfo not found, fetching on-the-fly as a fallback...');
-            modelInfo = await modelStateService.getCurrentModelInfo('stt');
-        }
-        if (!modelInfo) {
-            throw new Error('STT model info could not be retrieved.');
-        }
-
-        let payload;
-        if (modelInfo.provider === 'gemini') {
-            payload = { audio: { data, mimeType: mimeType || 'audio/pcm;rate=24000' } };
-        } else if (modelInfo.provider === 'deepgram') {
-            payload = Buffer.from(data, 'base64');
-        } else {
-            payload = data;
-        }
-
-        await this.theirSttSession.sendRealtimeInput(payload);
+        await this.sendAudio('Them', data, mimeType);
         return { success: true };
+    }
+
+    /** System audio from the renderer (Windows loopback); echoed back as the AEC reference. */
+    async handleSendSystemAudioContent(data, mimeType) {
+        try {
+            await this.sendSystemAudioContent(data, mimeType);
+            this.sendToRenderer('system-audio-data', { data });
+            return { success: true };
+        } catch (error) {
+            return { success: false, error: error.message };
+        }
     }
 
     killExistingSystemAudioDump() {
         return new Promise(resolve => {
-            console.log('Checking for existing SystemAudioDump processes...');
-
-            const killProc = spawn('pkill', ['-f', 'SystemAudioDump'], {
-                stdio: 'ignore',
-            });
-
-            killProc.on('close', code => {
-                if (code === 0) {
-                    console.log('Killed existing SystemAudioDump processes');
-                } else {
-                    console.log('No existing SystemAudioDump processes found');
-                }
-                resolve();
-            });
-
-            killProc.on('error', err => {
-                console.log('Error checking for existing processes (this is normal):', err.message);
-                resolve();
-            });
-
-            setTimeout(() => {
+            const killProc = spawn('pkill', ['-f', 'SystemAudioDump'], { stdio: 'ignore' });
+            const timeout = setTimeout(() => {
                 killProc.kill();
                 resolve();
             }, 2000);
+            const done = () => {
+                clearTimeout(timeout);
+                resolve();
+            };
+            killProc.on('close', done);
+            killProc.on('error', done);
         });
     }
 
+    isMacOSAudioRunning() {
+        return !!this.systemAudioProc;
+    }
+
     async startMacOSAudioCapture() {
-        if (process.platform !== 'darwin' || !this.theirSttSession) return false;
+        if (process.platform !== 'darwin' || !this.sessions.Them) return false;
 
         await this.killExistingSystemAudioDump();
-        console.log('Starting macOS audio capture for "Them"...');
 
         const { app } = require('electron');
         const path = require('path');
@@ -641,158 +301,93 @@ class SttService {
             ? path.join(process.resourcesPath, 'app.asar.unpacked', 'src', 'ui', 'assets', 'SystemAudioDump')
             : path.join(app.getAppPath(), 'src', 'ui', 'assets', 'SystemAudioDump');
 
-        console.log('SystemAudioDump path:', systemAudioPath);
-
-        this.systemAudioProc = spawn(systemAudioPath, [], {
-            stdio: ['ignore', 'pipe', 'pipe'],
-        });
-
-        if (!this.systemAudioProc.pid) {
-            console.error('Failed to start SystemAudioDump');
+        const proc = spawn(systemAudioPath, [], { stdio: ['ignore', 'pipe', 'pipe'] });
+        if (!proc.pid) {
+            console.error('[SttService] Failed to start SystemAudioDump');
             return false;
         }
+        this.systemAudioProc = proc;
+        console.log('[SttService] SystemAudioDump started with PID:', proc.pid);
 
-        console.log('SystemAudioDump started with PID:', this.systemAudioProc.pid);
+        // Collected chunks are copied out once per 100 ms chunk instead of
+        // re-concatenating the whole pending buffer on every stdout read.
+        const pending = [];
+        let pendingBytes = 0;
+        proc.stdout.on('data', data => {
+            pending.push(data);
+            pendingBytes += data.length;
+            if (pendingBytes < SYSTEM_AUDIO_CHUNK_BYTES) return;
 
-        const CHUNK_DURATION = 0.1;
-        const SAMPLE_RATE = 24000;
-        const BYTES_PER_SAMPLE = 2;
-        const CHANNELS = 2;
-        const CHUNK_SIZE = SAMPLE_RATE * BYTES_PER_SAMPLE * CHANNELS * CHUNK_DURATION;
+            let buffer = Buffer.concat(pending, pendingBytes);
+            pending.length = 0;
+            while (buffer.length >= SYSTEM_AUDIO_CHUNK_BYTES) {
+                const base64Data = convertStereoToMono(buffer.subarray(0, SYSTEM_AUDIO_CHUNK_BYTES)).toString('base64');
+                buffer = buffer.subarray(SYSTEM_AUDIO_CHUNK_BYTES);
 
-        let audioBuffer = Buffer.alloc(0);
-
-        // const provider = await this.getAiProvider();
-        // const isGemini = provider === 'gemini';
-
-        let modelInfo = this.modelInfo;
-        if (!modelInfo) {
-            console.warn('[SttService] modelInfo not found, fetching on-the-fly as a fallback...');
-            modelInfo = await modelStateService.getCurrentModelInfo('stt');
-        }
-        if (!modelInfo) {
-            throw new Error('STT model info could not be retrieved.');
-        }
-
-        this.systemAudioProc.stdout.on('data', async data => {
-            audioBuffer = Buffer.concat([audioBuffer, data]);
-
-            while (audioBuffer.length >= CHUNK_SIZE) {
-                const chunk = audioBuffer.slice(0, CHUNK_SIZE);
-                audioBuffer = audioBuffer.slice(CHUNK_SIZE);
-
-                const monoChunk = CHANNELS === 2 ? this.convertStereoToMono(chunk) : chunk;
-                const base64Data = monoChunk.toString('base64');
-
+                // The AEC reference for the microphone in the renderer.
                 this.sendToRenderer('system-audio-data', { data: base64Data });
-
-                if (this.theirSttSession) {
-                    try {
-                        let payload;
-                        if (modelInfo.provider === 'gemini') {
-                            payload = { audio: { data: base64Data, mimeType: 'audio/pcm;rate=24000' } };
-                        } else if (modelInfo.provider === 'deepgram') {
-                            payload = Buffer.from(base64Data, 'base64');
-                        } else {
-                            payload = base64Data;
-                        }
-
-                        await this.theirSttSession.sendRealtimeInput(payload);
-                    } catch (err) {
-                        console.error('Error sending system audio:', err.message);
-                    }
+                if (this.sessions.Them) {
+                    this.sendAudio('Them', base64Data).catch(err => console.error('[SttService] Error sending system audio:', err.message));
                 }
             }
+            if (buffer.length) pending.push(buffer);
+            pendingBytes = buffer.length;
         });
 
-        this.systemAudioProc.stderr.on('data', data => {
-            console.error('SystemAudioDump stderr:', data.toString());
-        });
+        proc.stderr.on('data', data => console.error('[SttService] SystemAudioDump stderr:', data.toString()));
 
-        this.systemAudioProc.on('close', code => {
-            console.log('SystemAudioDump process closed with code:', code);
-            this.systemAudioProc = null;
+        // A late 'close' from a stopped process must not forget its successor.
+        const forget = () => {
+            if (this.systemAudioProc === proc) this.systemAudioProc = null;
+        };
+        proc.on('close', code => {
+            console.log('[SttService] SystemAudioDump exited with code:', code);
+            forget();
         });
-
-        this.systemAudioProc.on('error', err => {
-            console.error('SystemAudioDump process error:', err);
-            this.systemAudioProc = null;
+        proc.on('error', err => {
+            console.error('[SttService] SystemAudioDump process error:', err);
+            forget();
         });
 
         return true;
     }
 
-    convertStereoToMono(stereoBuffer) {
-        const samples = stereoBuffer.length / 4;
-        const monoBuffer = Buffer.alloc(samples * 2);
-
-        for (let i = 0; i < samples; i++) {
-            const leftSample = stereoBuffer.readInt16LE(i * 4);
-            monoBuffer.writeInt16LE(leftSample, i * 2);
-        }
-
-        return monoBuffer;
-    }
-
     stopMacOSAudioCapture() {
         if (this.systemAudioProc) {
-            console.log('Stopping SystemAudioDump...');
             this.systemAudioProc.kill('SIGTERM');
             this.systemAudioProc = null;
         }
     }
 
     isSessionActive() {
-        return !!this.mySttSession && !!this.theirSttSession;
+        return !!this.sessions.Me && !!this.sessions.Them;
     }
 
     async closeSessions() {
+        this.generation++;
         this.stopMacOSAudioCapture();
 
-        // Clear heartbeat / renewal timers
-        if (this.keepAliveInterval) {
-            clearInterval(this.keepAliveInterval);
-            this.keepAliveInterval = null;
-        }
-        if (this.sessionRenewTimeout) {
-            clearTimeout(this.sessionRenewTimeout);
-            this.sessionRenewTimeout = null;
-        }
+        clearInterval(this.keepAliveInterval);
+        clearTimeout(this.sessionRenewTimeout);
+        this.keepAliveInterval = null;
+        this.sessionRenewTimeout = null;
 
         // Close first: providers like Whisper still deliver the final utterance
-        // while closing, which lands in the completion buffers below.
-        const closePromises = [];
-        if (this.mySttSession) {
-            closePromises.push(this.mySttSession.close());
-            this.mySttSession = null;
-        }
-        if (this.theirSttSession) {
-            closePromises.push(this.theirSttSession.close());
-            this.theirSttSession = null;
-        }
-
-        await Promise.all(closePromises);
-        console.log('All STT sessions closed.');
+        // while closing, which lands in the turn buffers flushed below.
+        const closing = SPEAKERS.map(speaker => this.sessions[speaker]?.close());
+        this.sessions = { Me: null, Them: null };
+        await Promise.all(closing);
 
         // Flush instead of dropping the turns still waiting for the debounce,
         // and wait until they are saved so the caller sees the full conversation.
-        if (this.myCompletionTimer) {
-            clearTimeout(this.myCompletionTimer);
-            this.myCompletionTimer = null;
-        }
-        if (this.theirCompletionTimer) {
-            clearTimeout(this.theirCompletionTimer);
-            this.theirCompletionTimer = null;
-        }
-        await Promise.all([this.flushMyCompletion(), this.flushTheirCompletion()]);
+        await Promise.all(SPEAKERS.map(speaker => this.flushCompletion(speaker)));
 
-        // Reset state
-        this.myCurrentUtterance = '';
-        this.theirCurrentUtterance = '';
-        this.myCompletionBuffer = '';
-        this.theirCompletionBuffer = '';
-        this.modelInfo = null; 
+        this.turns = { Me: newTurn(), Them: newTurn() };
+        this.modelInfo = null;
     }
 }
 
-module.exports = SttService; 
+module.exports = SttService;
+// Exported for tests.
+module.exports.convertStereoToMono = convertStereoToMono;
+module.exports.toProviderPayload = toProviderPayload;
