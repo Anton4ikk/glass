@@ -159,6 +159,14 @@ export class SettingsView extends LitElement {
         }
 
         /* Buttons Section */
+        /* Actions come first, right under the header's own divider. */
+        .buttons-section.actions-section {
+            flex: none;
+            border-top: none;
+            padding-top: 0;
+            padding-bottom: 6px;
+        }
+
         .buttons-section {
             display: flex;
             flex-direction: column;
@@ -1480,57 +1488,7 @@ export class SettingsView extends LitElement {
                     </div>
                 </div>
 
-                ${apiKeyManagementHTML}
-                ${modelSelectionHTML}
-
-                <div class="buttons-section" style="border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 6px; margin-top: 6px;">
-                    <button class="settings-button full-width" @click=${this.openShortcutEditor}>
-                        Edit Shortcuts
-                    </button>
-                </div>
-
-                
-                <div class="shortcuts-section">
-                    ${this.getMainShortcuts().map(shortcut => html`
-                        <div class="shortcut-item">
-                            <span class="shortcut-name">${shortcut.name}</span>
-                            <div class="shortcut-keys">
-                                ${this.renderShortcutKeys(shortcut.accelerator)}
-                            </div>
-                        </div>
-                    `)}
-                </div>
-
-                <div class="preset-section">
-                    <div class="preset-header">
-                        <span class="preset-title">
-                            My Presets
-                            <span class="preset-count">(${this.presets.filter(p => p.is_default === 0).length})</span>
-                        </span>
-                        <span class="preset-toggle" @click=${this.togglePresets}>
-                            ${this.showPresets ? '▼' : '▶'}
-                        </span>
-                    </div>
-                    
-                    <div class="preset-list ${this.showPresets ? '' : 'hidden'}">
-                        ${this.presets.filter(p => p.is_default === 0).length === 0 ? html`
-                            <div class="no-presets-message">
-                                No custom presets yet.<br>
-                                <span class="web-link" @click=${this.handlePersonalize}>
-                                    Create your first preset
-                                </span>
-                            </div>
-                        ` : this.presets.filter(p => p.is_default === 0).map(preset => html`
-                            <div class="preset-item ${this.selectedPreset?.id === preset.id ? 'selected' : ''}"
-                                 @click=${() => this.handlePresetSelect(preset)}>
-                                <span class="preset-name">${preset.title}</span>
-                                ${this.selectedPreset?.id === preset.id ? html`<span class="preset-status">Selected</span>` : ''}
-                            </div>
-                        `)}
-                    </div>
-                </div>
-
-                <div class="buttons-section">
+                <div class="buttons-section actions-section">
                     <button class="settings-button full-width" @click=${this.handlePersonalize}>
                         <span>Personalize / Meeting Notes</span>
                     </button>
@@ -1569,6 +1527,57 @@ export class SettingsView extends LitElement {
                         </button>
                     </div>
                 </div>
+
+
+                <div class="buttons-section" style="border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 6px; margin-top: 6px;">
+                    <button class="settings-button full-width" @click=${this.openShortcutEditor}>
+                        Edit Shortcuts
+                    </button>
+                </div>
+
+                <div class="shortcuts-section">
+                    ${this.getMainShortcuts().map(shortcut => html`
+                        <div class="shortcut-item">
+                            <span class="shortcut-name">${shortcut.name}</span>
+                            <div class="shortcut-keys">
+                                ${this.renderShortcutKeys(shortcut.accelerator)}
+                            </div>
+                        </div>
+                    `)}
+                </div>
+
+                ${modelSelectionHTML}
+
+                <div class="preset-section">
+                    <div class="preset-header">
+                        <span class="preset-title">
+                            My Presets
+                            <span class="preset-count">(${this.presets.filter(p => p.is_default === 0).length})</span>
+                        </span>
+                        <span class="preset-toggle" @click=${this.togglePresets}>
+                            ${this.showPresets ? '▼' : '▶'}
+                        </span>
+                    </div>
+                    
+                    <div class="preset-list ${this.showPresets ? '' : 'hidden'}">
+                        ${this.presets.filter(p => p.is_default === 0).length === 0 ? html`
+                            <div class="no-presets-message">
+                                No custom presets yet.<br>
+                                <span class="web-link" @click=${this.handlePersonalize}>
+                                    Create your first preset
+                                </span>
+                            </div>
+                        ` : this.presets.filter(p => p.is_default === 0).map(preset => html`
+                            <div class="preset-item ${this.selectedPreset?.id === preset.id ? 'selected' : ''}"
+                                 @click=${() => this.handlePresetSelect(preset)}>
+                                <span class="preset-name">${preset.title}</span>
+                                ${this.selectedPreset?.id === preset.id ? html`<span class="preset-status">Selected</span>` : ''}
+                            </div>
+                        `)}
+                    </div>
+                </div>
+
+                ${apiKeyManagementHTML}
             </div>
         `;
     }

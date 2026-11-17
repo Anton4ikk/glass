@@ -7,21 +7,52 @@ const modelStateService = require('../../common/services/modelStateService');
 // Analysis gets its own prompt: the shared 'pickle_glass_analysis' profile is
 // written for Ask (it promises a screenshot and forbids summaries), which
 // contradicted the summary format requested below.
-const ANALYSIS_SYSTEM_PROMPT = `You are the user's live meeting co-pilot. You receive a speech-to-text transcript of an ongoing conversation. Lines starting with "me:" are the user, lines starting with "them:" are the other participants.
+const ANALYSIS_SYSTEM_PROMPT = `You are the user's live meeting and interview co-pilot. You receive a speech-to-text transcript of an ongoing conversation and, when available, a screenshot of the user's screen. Lines starting with "me:" are the user, lines starting with "them:" are the other participants.
 
 The transcript is machine-generated and may contain recognition errors: infer the intended meaning and ignore fragments that are clearly noise.
 
-Write all content in the language of the conversation, but keep the four section headers exactly as written in English (**Summary Overview**, **Key Topic: ...**, **Extended Explanation**, **Suggested Questions**), because they are parsed by software.
+{{LANGUAGE_RULE}} Keep the section headers exactly as written in English (**Screen Task**, **Open Questions**, **Summary Overview**, **Key Topic: ...**, **Extended Explanation**), because they are parsed by software.
 
-If someone asked the user a question near the end of the transcript, start the Extended Explanation with a direct answer to it.
+The first two sections matter most: each question there is answered in detail elsewhere, so do NOT answer anything in them.
+- **Screen Task**: one line naming the task, problem or code visible on the screenshot (for example "LeetCode Two Sum, Python solution in the editor"). If the screen shows no task or code, write exactly: none
+- **Open Questions**: every question or task raised in the conversation by anyone, including the user thinking aloud ("is there a bug in this code?", "how do I solve this?", "how would you solve X", "what is the complexity", "tell me about Y"), newest first. Write each one as a short, self-contained question that makes sense without the transcript. Keep earlier open questions unless they were clearly answered or dropped. If there are none, write exactly: none
 
 <transcript>
 {{CONVERSATION_HISTORY}}
 </transcript>`;
 
+const LANGUAGE_RULES = {
+    ru: 'Write all content in Russian.',
+    en: 'Write all content in English.',
+};
+const DEFAULT_LANGUAGE_RULE = 'Write all content in the language of the conversation.';
+
+// New turns arriving within this window are analyzed together (the "me" and
+// "them" streams often flush a turn each at the same moment).
+const ANALYSIS_DEBOUNCE_MS = 1500;
+
+// What the model writes in the Open Questions section when there are none.
+const NO_QUESTIONS = /^(none|нет|—|-|n\/a)\.?$/i;
+const MAX_OPEN_QUESTIONS = 6;
+
+// The task on screen is always offered first, worded so Ask both solves it
+// and checks the code that is already written.
+const SCREEN_TASK_QUESTIONS = {
+    ru: task => `Реши задачу на экране (${task}). Если на экране есть код, проверь его, найди и исправь ошибки.`,
+    en: task => `Solve the task on screen (${task}). If there is code on screen, check it, find and fix any bugs.`,
+};
+
+// Fixed one-click requests under the insights, in the answer language.
+const DEFAULT_ACTIONS = {
+    ru: ['✨ Что мне сказать дальше?', '💬 Предложи уточняющие вопросы'],
+    en: ['✨ What should I say next?', '💬 Suggest follow-up questions'],
+};
+
 // Section headers the parser accepts, including translated ones a model may
 // produce despite the instruction above.
 const SECTION_HEADERS = [
+    { section: 'screen-task', pattern: /^(screen task|task on screen|задача на экране)/i },
+    { section: 'open-questions', pattern: /^(open questions|asked questions|questions asked|открытые вопросы|заданные вопросы)/i },
     { section: 'summary-overview', pattern: /^(summary overview|summary|обзор|краткое содержание|краткий обзор|резюме)/i },
     { section: 'topic', pattern: /^(key topic|main topic|ключевая тема|основная тема|тема)/i },
     { section: 'explanation', pattern: /^(extended explanation|explanation|подробное объяснение|подробнее|пояснение|объяснение)/i },
@@ -29,11 +60,29 @@ const SECTION_HEADERS = [
 ];
 
 const EMPTY_ANALYSIS = {
+    screenTask: '',
+    screenTaskQuestion: '',
+    questions: [],
     summary: [],
     topic: { header: '', bullets: [] },
     actions: [],
     followUps: [],
 };
+
+/**
+ * Whether two questions are the same one, rephrased. The model rewrites the
+ * open questions on every analysis, so exact comparison would re-trigger the
+ * auto answer for a question that was already answered.
+ */
+function isSameQuestion(a, b) {
+    const words = text => new Set(text.toLowerCase().match(/[\p{L}\p{N}]+/gu) || []);
+    const wa = words(a);
+    const wb = words(b);
+    if (wa.size === 0 || wb.size === 0) return false;
+    let common = 0;
+    for (const w of wa) if (wb.has(w)) common++;
+    return common / Math.min(wa.size, wb.size) >= 0.6;
+}
 
 /**
  * Recognizes "**Header**", "**Header:**", "## Header" and "**Key Topic: Name**".
@@ -65,6 +114,19 @@ class SummaryService {
         this.lastAppliedSeqBySession = new Map();
         this.lastAnalyzedCount = 0;
 
+        // Live analysis runs one at a time: turns that arrive while the model is
+        // busy are picked up by the next run instead of starting a parallel one.
+        this.analysisTimer = null;
+        this.analysisRunning = false;
+        this.analysisPending = false;
+
+        // Questions already answered automatically in this session.
+        this.autoAnsweredQuestions = [];
+        this.autoAnsweredScreenTasks = [];
+
+        // Models that rejected the screenshot; their analyses are text-only.
+        this.textOnlyModels = new Set();
+
         // Callbacks
         this.onAnalysisComplete = null;
         this.onStatusUpdate = null;
@@ -94,8 +156,7 @@ class SummaryService {
         console.log(`💬 Added conversation text: ${conversationText}`);
         console.log(`📈 Total conversation history: ${this.conversationHistory.length} texts`);
 
-        // Trigger analysis if needed
-        this.triggerAnalysisIfNeeded();
+        this.scheduleAnalysis();
     }
 
     getConversationHistory() {
@@ -107,6 +168,10 @@ class SummaryService {
         this.previousAnalysisResult = null;
         this.analysisHistory = [];
         this.lastAnalyzedCount = 0;
+        this.cancelScheduledAnalysis();
+        this.analysisPending = false;
+        this.autoAnsweredQuestions = [];
+        this.autoAnsweredScreenTasks = [];
         console.log('🔄 Conversation history and analysis state reset');
     }
 
@@ -125,7 +190,7 @@ class SummaryService {
      * Asks the LLM for an analysis. Throws on failure so the caller can show it.
      * @returns {Promise<{structuredData: object, responseText: string, model: string}>}
      */
-    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, maxTurns = 30) {
+    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { maxTurns = 30, screenshotBase64 = null, language = null } = {}) {
         console.log(`🔍 makeOutlineAndRequests called - conversationTexts: ${conversationTexts.length}`);
 
         const recentConversation = this.formatConversationForPrompt(conversationTexts, maxTurns);
@@ -133,17 +198,21 @@ class SummaryService {
         // 이전 분석 결과를 프롬프트에 포함
         let contextualPrompt = '';
         if (previousResult) {
+            const previousQuestions = (previousResult.questions || []).map(q => `  - ${q}`).join('\n');
             contextualPrompt = `
 Previous Analysis Context:
 - Main Topic: ${previousResult.topic.header}
 - Key Points: ${previousResult.summary.slice(0, 3).join(', ')}
-- Last Actions: ${previousResult.actions.slice(0, 2).join(', ')}
+- Open Questions so far:
+${previousQuestions || '  (none)'}
 
 Please build upon this context while analyzing the new conversation segments.
 `;
         }
 
-        const systemPrompt = ANALYSIS_SYSTEM_PROMPT.replace('{{CONVERSATION_HISTORY}}', recentConversation);
+        const systemPrompt = ANALYSIS_SYSTEM_PROMPT
+            .replace('{{LANGUAGE_RULE}}', LANGUAGE_RULES[language] || DEFAULT_LANGUAGE_RULE)
+            .replace('{{CONVERSATION_HISTORY}}', recentConversation);
 
         if (sessionId) {
             await sessionRepository.touch(sessionId);
@@ -164,7 +233,14 @@ Please build upon this context while analyzing the new conversation segments.
                 role: 'user',
                 content: `${contextualPrompt}
 
-Analyze the conversation and provide a structured summary. Respond in the same language as the conversation (e.g., if the conversation is in French, respond in French; if in English, respond in English), keeping the section headers in English. Format your response as follows:
+Analyze the conversation${screenshotBase64 ? ' and the screenshot of my screen' : ''}. Format your response as follows:
+
+**Screen Task**
+The task or code on my screen, or: none
+
+**Open Questions**
+1. Newest question or task raised?
+2. Earlier question still open?
 
 **Summary Overview**
 - Main discussion point with context
@@ -172,19 +248,31 @@ Analyze the conversation and provide a structured summary. Respond in the same l
 **Key Topic: [Topic Name]**
 - First key insight
 - Second key insight
-- Third key insight
 
 **Extended Explanation**
-Provide 2-3 sentences explaining the context and implications.
+1-2 sentences on the context and implications.
 
-**Suggested Questions**
-1. First follow-up question?
-2. Second follow-up question?
-3. Third follow-up question?
-
-Keep all points concise and build upon previous analysis if provided.`,
+Keep all points concise and build upon previous analysis if provided.${
+                    LANGUAGE_RULES[language]
+                        ? ` ${LANGUAGE_RULES[language]} This includes the screen task and every open question; the template above is in English only to show the format.`
+                        : ''
+                }`,
             },
         ];
+
+        const textOnly = !screenshotBase64 || this.textOnlyModels.has(modelInfo.model);
+        const withScreenshot = textOnly
+            ? messages
+            : [
+                  messages[0],
+                  {
+                      role: 'user',
+                      content: [
+                          { type: 'text', text: messages[1].content },
+                          { type: 'image_url', image_url: { url: `data:image/jpeg;base64,${screenshotBase64}` } },
+                      ],
+                  },
+              ];
 
         const llm = createLLM(modelInfo.provider, {
             apiKey: modelInfo.apiKey,
@@ -199,22 +287,36 @@ Keep all points concise and build upon previous analysis if provided.`,
             portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
         });
 
-        const completion = await llm.chat(messages);
+        let completion;
+        try {
+            completion = await llm.chat(withScreenshot);
+        } catch (error) {
+            if (textOnly) throw error;
+            // The model may not accept images: remember that and go text-only.
+            console.warn(`[SummaryService] Analysis with screenshot failed on ${modelInfo.model}, retrying text-only:`, error.message);
+            this.textOnlyModels.add(modelInfo.model);
+            completion = await llm.chat(messages);
+        }
 
         const responseText = completion.content;
         console.log(`✅ Analysis response received: ${responseText}`);
-        const structuredData = this.parseResponseText(responseText, previousResult);
+        const structuredData = this.parseResponseText(responseText, previousResult, language);
 
         return { structuredData, responseText, model: modelInfo.model };
     }
 
-    parseResponseText(responseText, previousResult) {
+    parseResponseText(responseText, previousResult, language = null) {
         const structuredData = {
+            screenTask: '',
+            screenTaskQuestion: '',
+            questions: [],
             summary: [],
             topic: { header: '', bullets: [] },
             actions: [],
             followUps: ['✉️ Draft a follow-up email', '✅ Generate action items', '📝 Show summary'],
         };
+        let sawQuestionsSection = false;
+        let sawScreenTaskSection = false;
 
         // 이전 결과가 있으면 기본값으로 사용
         if (previousResult) {
@@ -233,6 +335,8 @@ Keep all points concise and build upon previous analysis if provided.`,
                 const header = detectSectionHeader(trimmedLine);
                 if (header) {
                     currentSection = header.section;
+                    if (currentSection === 'open-questions') sawQuestionsSection = true;
+                    if (currentSection === 'screen-task') sawScreenTaskSection = true;
                     if (header.topicName) {
                         structuredData.topic.header = header.topicName + ':';
                     }
@@ -241,7 +345,22 @@ Keep all points concise and build upon previous analysis if provided.`,
 
                 // 컨텐츠 파싱
                 const bulletMatch = trimmedLine.match(/^[-•*]\s+(.*)$/);
-                if (bulletMatch && currentSection === 'summary-overview') {
+                if (currentSection === 'screen-task' && trimmedLine) {
+                    const task = trimmedLine.replace(/^[-•*]\s*/, '').trim();
+                    if (!structuredData.screenTask && !NO_QUESTIONS.test(task)) {
+                        structuredData.screenTask = task;
+                    }
+                } else if (currentSection === 'open-questions' && trimmedLine) {
+                    const question = trimmedLine.replace(/^(\d+[.)]|[-•*])\s*/, '').trim();
+                    if (
+                        question &&
+                        !NO_QUESTIONS.test(question) &&
+                        !structuredData.questions.includes(question) &&
+                        structuredData.questions.length < MAX_OPEN_QUESTIONS
+                    ) {
+                        structuredData.questions.push(question);
+                    }
+                } else if (bulletMatch && currentSection === 'summary-overview') {
                     const summaryPoint = bulletMatch[1].trim();
                     if (summaryPoint && !structuredData.summary.includes(summaryPoint)) {
                         // 기존 summary 업데이트 (최대 5개 유지)
@@ -276,7 +395,7 @@ Keep all points concise and build upon previous analysis if provided.`,
             }
 
             // 기본 액션 추가
-            const defaultActions = ['✨ What should I say next?', '💬 Suggest follow-up questions'];
+            const defaultActions = DEFAULT_ACTIONS[language] || DEFAULT_ACTIONS.en;
             defaultActions.forEach(action => {
                 if (!structuredData.actions.includes(action)) {
                     structuredData.actions.push(action);
@@ -285,6 +404,19 @@ Keep all points concise and build upon previous analysis if provided.`,
 
             // 액션 개수 제한
             structuredData.actions = structuredData.actions.slice(0, 5);
+
+            // The model returns the full updated list each time; if it skipped
+            // the section entirely, keep the previous list instead of wiping it.
+            if (!sawQuestionsSection && previousResult?.questions) {
+                structuredData.questions = [...previousResult.questions];
+            }
+            if (!sawScreenTaskSection && previousResult?.screenTask) {
+                structuredData.screenTask = previousResult.screenTask;
+            }
+            if (structuredData.screenTask) {
+                const template = SCREEN_TASK_QUESTIONS[language] || SCREEN_TASK_QUESTIONS.en;
+                structuredData.screenTaskQuestion = template(structuredData.screenTask);
+            }
 
             // 유효성 검증 및 이전 데이터 병합
             if (structuredData.summary.length === 0 && previousResult) {
@@ -311,12 +443,41 @@ Keep all points concise and build upon previous analysis if provided.`,
     }
 
     /**
-     * Triggers analysis when conversation history reaches 5 texts.
+     * Runs an analysis shortly after every new turn, so answers show up while
+     * the conversation is still going. Only one analysis runs at a time; turns
+     * that arrive meanwhile are covered by one follow-up run.
      */
-    triggerAnalysisIfNeeded() {
-        if (this.conversationHistory.length >= 5 && this.conversationHistory.length % 5 === 0) {
-            console.log(`Triggering analysis - ${this.conversationHistory.length} conversation texts accumulated`);
-            this.runAnalysis();
+    scheduleAnalysis() {
+        this.cancelScheduledAnalysis();
+        this.analysisTimer = setTimeout(() => {
+            this.analysisTimer = null;
+            this.runLiveAnalysis();
+        }, ANALYSIS_DEBOUNCE_MS);
+    }
+
+    cancelScheduledAnalysis() {
+        if (this.analysisTimer) {
+            clearTimeout(this.analysisTimer);
+            this.analysisTimer = null;
+        }
+    }
+
+    async runLiveAnalysis() {
+        if (this.analysisRunning) {
+            this.analysisPending = true;
+            return;
+        }
+        this.analysisRunning = true;
+        try {
+            await this.runAnalysis();
+        } finally {
+            this.analysisRunning = false;
+        }
+        if (this.analysisPending) {
+            this.analysisPending = false;
+            if (this.conversationHistory.length > this.lastAnalyzedCount) {
+                this.runLiveAnalysis();
+            }
         }
     }
 
@@ -326,6 +487,8 @@ Keep all points concise and build upon previous analysis if provided.`,
      * Runs in the background so Stop isn't held up by the LLM.
      */
     finalizeSession() {
+        this.cancelScheduledAnalysis();
+        this.analysisPending = false;
         if (this.conversationHistory.length > this.lastAnalyzedCount) {
             console.log(`Final analysis - ${this.conversationHistory.length - this.lastAnalyzedCount} unanalyzed conversation texts`);
             return this.runAnalysis();
@@ -342,7 +505,11 @@ Keep all points concise and build upon previous analysis if provided.`,
         let result;
         let error;
         try {
-            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, this.previousAnalysisResult);
+            const [screenshotBase64, language] = await Promise.all([this.captureScreen(), this.getAnswerLanguage()]);
+            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, this.previousAnalysisResult, {
+                screenshotBase64,
+                language,
+            });
         } catch (err) {
             error = err;
         }
@@ -402,9 +569,58 @@ Keep all points concise and build upon previous analysis if provided.`,
         console.log('Sending structured data to renderer');
         this.sendToRenderer('summary-update', structuredData);
 
+        this.autoAnswerNewestQuestion(structuredData);
+
         // Notify callback
         if (this.onAnalysisComplete) {
             this.onAnalysisComplete(structuredData);
+        }
+    }
+
+    /**
+     * Answers in Ask without a click: first the task on screen (once per
+     * task), then the newest question heard. A newer question interrupts the
+     * answer to an older one; a question that was already answered (even if
+     * rephrased) is not repeated.
+     */
+    autoAnswerNewestQuestion({ screenTask, screenTaskQuestion, questions } = {}) {
+        let question = null;
+        if (screenTask && !this.autoAnsweredScreenTasks.some(t => isSameQuestion(t, screenTask))) {
+            this.autoAnsweredScreenTasks.push(screenTask);
+            question = screenTaskQuestion;
+        } else {
+            const newest = questions?.[0];
+            if (newest && !this.autoAnsweredQuestions.some(q => isSameQuestion(q, newest))) {
+                this.autoAnsweredQuestions.push(newest);
+                question = newest;
+            }
+        }
+        if (!question) return;
+
+        console.log(`[SummaryService] Auto-answering: ${question}`);
+        const askService = require('../../ask/askService');
+        askService.sendMessage(question, [...this.conversationHistory]).catch(error => {
+            console.error('[SummaryService] Auto answer failed:', error.message);
+        });
+    }
+
+    async captureScreen() {
+        try {
+            const { captureScreenshot } = require('../../common/utils/screenCapture');
+            const result = await captureScreenshot();
+            return result.success ? result.base64 : null;
+        } catch (error) {
+            console.warn('[SummaryService] Screenshot for analysis failed:', error.message);
+            return null;
+        }
+    }
+
+    /** The RU/EN switch picks the transcription language; insights follow it. */
+    async getAnswerLanguage() {
+        try {
+            return await require('../../settings/settingsService').getSttLanguageSetting();
+        } catch {
+            return null;
         }
     }
 
@@ -418,3 +634,5 @@ Keep all points concise and build upon previous analysis if provided.`,
 }
 
 module.exports = SummaryService;
+// Exported for tests.
+module.exports.isSameQuestion = isSameQuestion;

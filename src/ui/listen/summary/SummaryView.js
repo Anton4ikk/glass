@@ -189,6 +189,16 @@ export class SummaryView extends LitElement {
             transform: translateX(2px);
         }
 
+        /* Summary and topic lines are statements, not requests: not clickable. */
+        .markdown-content.static {
+            cursor: default;
+        }
+
+        .markdown-content.static:hover {
+            background: transparent;
+            transform: none;
+        }
+
         .markdown-content p {
             margin: 4px 0;
         }
@@ -239,6 +249,19 @@ export class SummaryView extends LitElement {
             background: rgba(255, 80, 80, 0.15);
             color: rgba(255, 180, 180, 0.95);
             font-size: 11px;
+        }
+
+        /* Questions heard in the conversation: click one to get it answered in Ask. */
+        .question-item {
+            margin: 2px 0;
+            padding: 6px 10px;
+            border-radius: 6px;
+            background: rgba(120, 180, 255, 0.14);
+            border-left: 3px solid rgba(120, 180, 255, 0.8);
+        }
+
+        .question-item:hover {
+            background: rgba(120, 180, 255, 0.26);
         }
     `;
 
@@ -434,6 +457,11 @@ export class SummaryView extends LitElement {
         const data = this.structuredData || { summary: [], topic: { header: '', bullets: [] }, actions: [] };
         let sections = [];
 
+        const questions = [data.screenTaskQuestion, ...(data.questions || [])].filter(Boolean);
+        if (questions.length > 0) {
+            sections.push(`Questions:\n${questions.map(q => `• ${q}`).join('\n')}`);
+        }
+
         if (data.summary && data.summary.length > 0) {
             sections.push(`Current Summary:\n${data.summary.map(s => `• ${s}`).join('\n')}`);
         }
@@ -469,7 +497,10 @@ export class SummaryView extends LitElement {
             actions: [],
         };
 
-        const hasAnyContent = data.summary.length > 0 || data.topic.bullets.length > 0 || data.actions.length > 0;
+        // The task on screen always comes first; clicking any question answers it in Ask.
+        const questions = [data.screenTaskQuestion, ...(data.questions || [])].filter(Boolean);
+        const hasAnyContent =
+            questions.length > 0 || data.summary.length > 0 || data.topic.bullets.length > 0 || data.actions.length > 0;
 
         return html`
             <div class="insights-container">
@@ -477,6 +508,24 @@ export class SummaryView extends LitElement {
                 ${!hasAnyContent
                     ? data.error ? '' : html`<div class="empty-state">No insights yet...</div>`
                     : html`
+                        ${questions.length > 0
+                            ? html`
+                                  <insights-title>Questions</insights-title>
+                                  ${questions.map(
+                                      (question, index) => html`
+                                          <div
+                                              class="markdown-content question-item"
+                                              data-markdown-id="question-${index}"
+                                              data-original-text="${question}"
+                                              title="Answer this in Ask"
+                                              @click=${() => this.handleRequestClick(question)}
+                                          >
+                                              ${question}
+                                          </div>
+                                      `
+                                  )}
+                              `
+                            : ''}
                         <insights-title>Current Summary</insights-title>
                         ${data.summary.length > 0
                             ? data.summary
@@ -484,10 +533,9 @@ export class SummaryView extends LitElement {
                                   .map(
                                       (bullet, index) => html`
                                           <div
-                                              class="markdown-content"
+                                              class="markdown-content static"
                                               data-markdown-id="summary-${index}"
                                               data-original-text="${bullet}"
-                                              @click=${() => this.handleMarkdownClick(bullet)}
                                           >
                                               ${bullet}
                                           </div>
@@ -502,10 +550,9 @@ export class SummaryView extends LitElement {
                                       .map(
                                           (bullet, index) => html`
                                               <div
-                                                  class="markdown-content"
+                                                  class="markdown-content static"
                                                   data-markdown-id="topic-${index}"
                                                   data-original-text="${bullet}"
-                                                  @click=${() => this.handleMarkdownClick(bullet)}
                                               >
                                                   ${bullet}
                                               </div>

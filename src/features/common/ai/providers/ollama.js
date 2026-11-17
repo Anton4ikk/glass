@@ -316,6 +316,80 @@ function createLLM({
     };
 }
 
+/**
+ * Turns Ollama's NDJSON chat stream into OpenAI-style SSE chunks.
+ *
+ * The consumer may cancel at any time (Ask cancels its reader on a new
+ * question or when the window closes). After that the controller is closed,
+ * so later 'data'/'end' events must not touch it - controller.close() on a
+ * closed stream throws and crashed the app. Cancelling also destroys the HTTP
+ * body, so Ollama stops generating an answer nobody reads.
+ */
+function ollamaStreamSource(body) {
+    let finished = false;
+    const encoder = new TextEncoder();
+
+    return {
+        start(controller) {
+            let buffer = '';
+            const send = payload => {
+                if (!finished) controller.enqueue(encoder.encode(`data: ${payload}\n\n`));
+            };
+
+            body.on('data', chunk => {
+                if (finished) return;
+                buffer += chunk.toString();
+                const lines = buffer.split('\n');
+                buffer = lines.pop() || '';
+
+                for (const line of lines) {
+                    if (line.trim() === '') continue;
+
+                    let data;
+                    try {
+                        data = JSON.parse(line);
+                    } catch (e) {
+                        console.error('[Ollama Provider] Failed to parse chunk:', e);
+                        continue;
+                    }
+
+                    // Reasoning is forwarded separately so the UI can show
+                    // progress; it never becomes part of the answer.
+                    if (data.message?.thinking) {
+                        send(JSON.stringify({ choices: [{ delta: { reasoning: data.message.thinking } }] }));
+                    }
+                    if (data.message?.content) {
+                        send(JSON.stringify({ choices: [{ delta: { content: data.message.content } }] }));
+                    }
+                    if (data.done) {
+                        send('[DONE]');
+                    }
+                }
+            });
+
+            body.on('end', () => {
+                if (finished) return;
+                finished = true;
+                controller.close();
+                console.log('[Ollama Provider] Streaming completed');
+            });
+
+            body.on('error', error => {
+                if (finished) return;
+                finished = true;
+                console.error('[Ollama Provider] Streaming error:', error);
+                controller.error(error);
+            });
+        },
+
+        cancel(reason) {
+            finished = true;
+            console.log(`[Ollama Provider] Stream cancelled by consumer${reason ? `: ${reason}` : ''}`);
+            body.destroy();
+        },
+    };
+}
+
 function createStreamingLLM({ 
     model, 
     temperature = 0.7, 
@@ -362,67 +436,7 @@ function createStreamingLLM({
 
                     console.log('[Ollama Provider] Got streaming response');
 
-                    const stream = new ReadableStream({
-                        async start(controller) {
-                            let buffer = '';
-
-                            try {
-                                response.body.on('data', (chunk) => {
-                                    buffer += chunk.toString();
-                                    const lines = buffer.split('\n');
-                                    buffer = lines.pop() || '';
-
-                                    for (const line of lines) {
-                                        if (line.trim() === '') continue;
-                                        
-                                        try {
-                                            const data = JSON.parse(line);
-                                            
-                                            // Reasoning is forwarded separately so the UI can show
-                                            // progress; it never becomes part of the answer.
-                                            if (data.message?.thinking) {
-                                                const sseData = JSON.stringify({
-                                                    choices: [{ delta: { reasoning: data.message.thinking } }]
-                                                });
-                                                controller.enqueue(new TextEncoder().encode(`data: ${sseData}\n\n`));
-                                            }
-
-                                            if (data.message?.content) {
-                                                const sseData = JSON.stringify({
-                                                    choices: [{
-                                                        delta: {
-                                                            content: data.message.content
-                                                        }
-                                                    }]
-                                                });
-                                                controller.enqueue(new TextEncoder().encode(`data: ${sseData}\n\n`));
-                                            }
-                                            
-                                            if (data.done) {
-                                                controller.enqueue(new TextEncoder().encode('data: [DONE]\n\n'));
-                                            }
-                                        } catch (e) {
-                                            console.error('[Ollama Provider] Failed to parse chunk:', e);
-                                        }
-                                    }
-                                });
-
-                                response.body.on('end', () => {
-                                    controller.close();
-                                    console.log('[Ollama Provider] Streaming completed');
-                                });
-
-                                response.body.on('error', (error) => {
-                                    console.error('[Ollama Provider] Streaming error:', error);
-                                    controller.error(error);
-                                });
-                                
-                            } catch (error) {
-                                console.error('[Ollama Provider] Streaming setup error:', error);
-                                controller.error(error);
-                            }
-                        }
-                    });
+                    const stream = new ReadableStream(ollamaStreamSource(response.body));
 
                     return {
                         ok: true,
@@ -444,5 +458,7 @@ module.exports = {
     createStreamingLLM,
     convertMessagesToOllamaFormat,
     holdModelLoaded,
+    // Exported for tests.
+    ollamaStreamSource,
     releaseModel,
 }; 

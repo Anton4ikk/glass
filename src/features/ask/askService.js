@@ -15,116 +15,18 @@ const getWindowPool = () => {
 const sessionRepository = require('../common/repositories/session');
 const askRepository = require('./repositories');
 const { getSystemPrompt } = require('../common/prompts/promptBuilder');
-const path = require('node:path');
-const fs = require('node:fs');
-const os = require('os');
-const util = require('util');
-const execFile = util.promisify(require('child_process').execFile);
-const { desktopCapturer } = require('electron');
 const modelStateService = require('../common/services/modelStateService');
+const { captureScreenshot } = require('../common/utils/screenCapture');
 
-// Try to load sharp, but don't fail if it's not available
-let sharp;
-try {
-    sharp = require('sharp');
-    console.log('[AskService] Sharp module loaded successfully');
-} catch (error) {
-    console.warn('[AskService] Sharp module not available:', error.message);
-    console.warn('[AskService] Screenshot functionality will work with reduced image processing capabilities');
-    sharp = null;
-}
-let lastScreenshot = null;
+// The RU/EN switch in Settings sets the language of the conversation; answers
+// follow it, whatever language the question or the screen is in.
+const ANSWER_LANGUAGE_RULES = {
+    ru: 'IMPORTANT: Write your entire answer in Russian.',
+    en: 'IMPORTANT: Write your entire answer in English.',
+};
 
-const SCREENSHOT_HEIGHT = 768;
 // How often reasoning progress is pushed to the Ask window.
 const REASONING_BROADCAST_MS = 250;
-
-async function captureScreenshot(options = {}) {
-    if (process.platform === 'darwin') {
-        try {
-            const tempPath = path.join(os.tmpdir(), `screenshot-${Date.now()}.jpg`);
-
-            await execFile('screencapture', ['-x', '-t', 'jpg', tempPath]);
-
-            const imageBuffer = await fs.promises.readFile(tempPath);
-            await fs.promises.unlink(tempPath);
-
-            if (sharp) {
-                try {
-                    // Try using sharp for optimal image processing
-                    // 768 px: at 384 px vision models can't read screen text and
-                    // invent it (gemma4:e4b read "main.cpp" off a README). 768 px
-                    // costs ~440 image tokens vs ~130, about +1.5 s on gemma4:e4b.
-                    const resizedBuffer = await sharp(imageBuffer)
-                        .resize({ height: SCREENSHOT_HEIGHT, withoutEnlargement: true })
-                        .jpeg({ quality: 80 })
-                        .toBuffer();
-
-                    const base64 = resizedBuffer.toString('base64');
-                    const metadata = await sharp(resizedBuffer).metadata();
-
-                    lastScreenshot = {
-                        base64,
-                        width: metadata.width,
-                        height: metadata.height,
-                        timestamp: Date.now(),
-                    };
-
-                    return { success: true, base64, width: metadata.width, height: metadata.height };
-                } catch (sharpError) {
-                    console.warn('Sharp module failed, falling back to basic image processing:', sharpError.message);
-                }
-            }
-            
-            // Fallback: Return the original image without resizing
-            console.log('[AskService] Using fallback image processing (no resize/compression)');
-            const base64 = imageBuffer.toString('base64');
-            
-            lastScreenshot = {
-                base64,
-                width: null, // We don't have metadata without sharp
-                height: null,
-                timestamp: Date.now(),
-            };
-
-            return { success: true, base64, width: null, height: null };
-        } catch (error) {
-            console.error('Failed to capture screenshot:', error);
-            return { success: false, error: error.message };
-        }
-    }
-
-    try {
-        const sources = await desktopCapturer.getSources({
-            types: ['screen'],
-            thumbnailSize: {
-                width: 1920,
-                height: 1080,
-            },
-        });
-
-        if (sources.length === 0) {
-            throw new Error('No screen sources available');
-        }
-        const source = sources[0];
-        const buffer = source.thumbnail.toJPEG(70);
-        const base64 = buffer.toString('base64');
-        const size = source.thumbnail.getSize();
-
-        return {
-            success: true,
-            base64,
-            width: size.width,
-            height: size.height,
-        };
-    } catch (error) {
-        console.error('Failed to capture screenshot using desktopCapturer:', error);
-        return {
-            success: false,
-            error: error.message,
-        };
-    }
-}
 
 /**
  * @class
@@ -264,7 +166,12 @@ class AskService {
 
             const conversationHistory = this._formatConversationForPrompt(conversationHistoryRaw);
 
-            const systemPrompt = getSystemPrompt('pickle_glass_analysis', conversationHistory, false);
+            // Lazy-required: settingsService pulls in the window manager.
+            const settingsService = require('../settings/settingsService');
+            const language = await settingsService.getSttLanguageSetting();
+            const systemPrompt =
+                getSystemPrompt('pickle_glass_analysis', conversationHistory, false) +
+                (ANSWER_LANGUAGE_RULES[language] ? `\n\n${ANSWER_LANGUAGE_RULES[language]}` : '');
 
             const messages = [
                 { role: 'system', content: systemPrompt },
@@ -283,8 +190,7 @@ class AskService {
                 });
             }
             
-            // Lazy-required: settingsService pulls in the window manager.
-            const think = await require('../settings/settingsService').getAskThinkingSetting();
+            const think = await settingsService.getAskThinkingSetting();
 
             const streamingLLM = createStreamingLLM(modelInfo.provider, {
                 apiKey: modelInfo.apiKey,
