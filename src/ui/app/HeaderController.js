@@ -1,20 +1,18 @@
 import './MainHeader.js';
 import './ApiKeyHeader.js';
 import './PermissionHeader.js';
-import './WelcomeHeader.js';
 
 class HeaderTransitionManager {
     constructor() {
         this.headerContainer      = document.getElementById('header-container');
-        this.currentHeaderType    = null;   // 'welcome' | 'apikey' | 'main' | 'permission'
-        this.welcomeHeader        = null;
+        this.currentHeaderType    = null;   // 'apikey' | 'main' | 'permission'
         this.apiKeyHeader         = null;
         this.mainHeader            = null;
         this.permissionHeader      = null;
 
         /**
          * only one header window is allowed
-         * @param {'welcome'|'apikey'|'main'|'permission'} type
+         * @param {'apikey'|'main'|'permission'} type
          */
         this.ensureHeader = (type) => {
             console.log('[HeaderController] ensureHeader: Ensuring header of type:', type);
@@ -24,23 +22,15 @@ class HeaderTransitionManager {
             }
 
             this.headerContainer.innerHTML = '';
-            
-            this.welcomeHeader = null;
+
             this.apiKeyHeader = null;
             this.mainHeader = null;
             this.permissionHeader = null;
 
             // Create new header element
-            if (type === 'welcome') {
-                this.welcomeHeader = document.createElement('welcome-header');
-                this.welcomeHeader.loginCallback = () => this.handleLoginOption();
-                this.welcomeHeader.apiKeyCallback = () => this.handleApiKeyOption();
-                this.headerContainer.appendChild(this.welcomeHeader);
-                console.log('[HeaderController] ensureHeader: Header of type:', type, 'created.');
-            } else if (type === 'apikey') {
+            if (type === 'apikey') {
                 this.apiKeyHeader = document.createElement('apikey-header');
-                this.apiKeyHeader.stateUpdateCallback = (userState) => this.handleStateUpdate(userState);
-                this.apiKeyHeader.backCallback = () => this.transitionToWelcomeHeader();
+                this.apiKeyHeader.stateUpdateCallback = () => this.handleStateUpdate();
                 this.apiKeyHeader.addEventListener('request-resize', e => {
                     this._resizeForApiKey(e.detail.height); 
                 });
@@ -71,36 +61,13 @@ class HeaderTransitionManager {
 
         console.log('[HeaderController] Manager initialized');
 
-        // WelcomeHeader 콜백 메서드들
-        this.handleLoginOption = this.handleLoginOption.bind(this);
-        this.handleApiKeyOption = this.handleApiKeyOption.bind(this);
-
         this._bootstrap();
 
         if (window.api) {
-            window.api.headerController.onUserStateChanged((event, userState) => {
-                console.log('[HeaderController] Received user state change:', userState);
-                this.handleStateUpdate(userState);
-            });
-
-            window.api.headerController.onAuthFailed((event, { message }) => {
-                console.error('[HeaderController] Received auth failure from main process:', message);
-                if (this.apiKeyHeader) {
-                    this.apiKeyHeader.errorMessage = 'Authentication failed. Please try again.';
-                    this.apiKeyHeader.isLoading = false;
-                }
-            });
             window.api.headerController.onForceShowApiKeyHeader(async () => {
                 console.log('[HeaderController] Received broadcast to show apikey header. Switching now.');
-                const isConfigured = await window.api.apiKeyHeader.areProvidersConfigured();
-                if (!isConfigured) {
-                    await this._resizeForWelcome();
-                    this.ensureHeader('welcome');
-                } else {
-                    await this._resizeForApiKey();
-                    this.ensureHeader('apikey');
-                }
-            });            
+                await this.transitionToApiKeyHeader();
+            });
         }
     }
 
@@ -112,25 +79,18 @@ class HeaderTransitionManager {
     }
 
     async _bootstrap() {
-        // The initial state will be sent by the main process via 'user-state-changed'
-        // We just need to request it.
         if (window.api) {
-            const userState = await window.api.common.getCurrentUser();
-            console.log('[HeaderController] Bootstrapping with initial user state:', userState);
-            this.handleStateUpdate(userState);
+            this.handleStateUpdate();
         } else {
             // Fallback for non-electron environment (testing/web)
-            this.ensureHeader('welcome');
+            this.ensureHeader('apikey');
         }
     }
 
-
-    //////// after_modelStateService ////////
-    async handleStateUpdate(userState) {
+    async handleStateUpdate() {
         const isConfigured = await window.api.apiKeyHeader.areProvidersConfigured();
 
         if (isConfigured) {
-            // If providers are configured, always check permissions regardless of login state.
             const permissionResult = await this.checkPermissions();
             if (permissionResult.success) {
                 this.transitionToMainHeader();
@@ -138,39 +98,15 @@ class HeaderTransitionManager {
                 this.transitionToPermissionHeader();
             }
         } else {
-            // If no providers are configured, show the welcome header to prompt for setup.
-            await this._resizeForWelcome();
-            this.ensureHeader('welcome');
+            // No providers configured yet: ask for API keys / local models.
+            await this.transitionToApiKeyHeader();
         }
     }
 
-    // WelcomeHeader 콜백 메서드들
-    async handleLoginOption() {
-        console.log('[HeaderController] Login option selected');
-        if (window.api) {
-            await window.api.common.startFirebaseAuth();
-        }
-    }
-
-    async handleApiKeyOption() {
-        console.log('[HeaderController] API key option selected');
+    async transitionToApiKeyHeader() {
         await this._resizeForApiKey(400);
         this.ensureHeader('apikey');
-        // ApiKeyHeader에 뒤로가기 콜백 설정
-        if (this.apiKeyHeader) {
-            this.apiKeyHeader.backCallback = () => this.transitionToWelcomeHeader();
-        }
     }
-
-    async transitionToWelcomeHeader() {
-        if (this.currentHeaderType === 'welcome') {
-            return this._resizeForWelcome();
-        }
-
-        await this._resizeForWelcome();
-        this.ensureHeader('welcome');
-    }
-    //////// after_modelStateService ////////
 
     async transitionToPermissionHeader() {
         // Prevent duplicate transitions
@@ -201,19 +137,7 @@ class HeaderTransitionManager {
             }
         }
 
-        let initialHeight = 220;
-        if (window.api) {
-            try {
-                const userState = await window.api.common.getCurrentUser();
-                if (userState.mode === 'firebase') {
-                    initialHeight = 280;
-                }
-            } catch (e) {
-                console.error('Could not get user state for resize', e);
-            }
-        }
-
-        await this._resizeForPermissionHeader(initialHeight);
+        await this._resizeForPermissionHeader(220);
         this.ensureHeader('permission');
     }
 
@@ -242,13 +166,6 @@ class HeaderTransitionManager {
         if (!window.api) return;
         const finalHeight = height || 220;
         return window.api.headerController.resizeHeaderWindow({ width: 285, height: finalHeight })
-            .catch(() => {});
-    }
-
-    async _resizeForWelcome() {
-        if (!window.api) return;
-        console.log('[HeaderController] _resizeForWelcome: Resizing window to 456x370');
-        return window.api.headerController.resizeHeaderWindow({ width: 456, height: 364 })
             .catch(() => {});
     }
 

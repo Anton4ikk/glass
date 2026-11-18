@@ -1,7 +1,7 @@
 const { ipcMain, BrowserWindow } = require('electron');
 const Store = require('electron-store');
-const authService = require('../common/services/authService');
 const settingsRepository = require('./repositories');
+const { LOCAL_UID } = require('../common/config/localUser');
 const { getStoredApiKey, getStoredProvider, windowPool } = require('../../window/windowManager');
 
 // New imports for common services
@@ -220,8 +220,7 @@ function getDefaultSettings() {
 
 async function getSettings() {
     try {
-        const uid = authService.getCurrentUserId();
-        const userSettingsKey = uid ? `users.${uid}` : 'users.default';
+        const userSettingsKey = `users.${LOCAL_UID}`;
         
         const defaultSettings = getDefaultSettings();
         const savedSettings = store.get(userSettingsKey, {});
@@ -236,8 +235,7 @@ async function getSettings() {
 
 async function saveSettings(settings) {
     try {
-        const uid = authService.getCurrentUserId();
-        const userSettingsKey = uid ? `users.${uid}` : 'users.default';
+        const userSettingsKey = `users.${LOCAL_UID}`;
         
         const currentSaved = store.get(userSettingsKey, {});
         const newSettings = { ...currentSaved, ...settings };
@@ -257,7 +255,6 @@ async function saveSettings(settings) {
 
 async function getPresets() {
     try {
-        // The adapter now handles which presets to return based on login state.
         const presets = await settingsRepository.getPresets();
         return presets;
     } catch (error) {
@@ -401,25 +398,6 @@ async function updateContentProtection(enabled) {
     }
 }
 
-async function getAutoUpdateSetting() {
-    try {
-        return await settingsRepository.getAutoUpdate();
-    } catch (error) {
-        console.error('[SettingsService] Error getting auto update setting:', error);
-        return true; // Fallback to enabled
-    }
-}
-
-async function setAutoUpdateSetting(isEnabled) {
-    try {
-        await settingsRepository.setAutoUpdate(isEnabled);
-        return { success: true };
-    } catch (error) {
-        console.error('[SettingsService] Error setting auto update setting:', error);
-        return { success: false, error: error.message };
-    }
-}
-
 async function getSttLanguageSetting() {
     try {
         return await settingsRepository.getSttLanguage();
@@ -459,6 +437,26 @@ async function setAskThinkingSetting(enabled) {
     }
 }
 
+async function getAboutMeSetting() {
+    try {
+        return await settingsRepository.getAboutMe();
+    } catch (error) {
+        console.error('[SettingsService] Error getting About me:', error);
+        return '';
+    }
+}
+
+async function setAboutMeSetting(text) {
+    try {
+        const result = await settingsRepository.setAboutMe(text);
+        if (result?.success === false) return result;
+        return { success: true, aboutMe: result?.aboutMe ?? '' };
+    } catch (error) {
+        console.error('[SettingsService] Error setting About me:', error);
+        return { success: false, error: error.message };
+    }
+}
+
 function initialize() {
     // cleanup
     windowNotificationManager.cleanup();
@@ -493,12 +491,12 @@ module.exports = {
     saveApiKey,
     removeApiKey,
     updateContentProtection,
-    getAutoUpdateSetting,
-    setAutoUpdateSetting,
     getSttLanguageSetting,
     setSttLanguageSetting,
     getAskThinkingSetting,
     setAskThinkingSetting,
+    getAboutMeSetting,
+    setAboutMeSetting,
     // Model settings facade
     getModelSettings,
     clearApiKey,

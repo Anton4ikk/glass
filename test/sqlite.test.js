@@ -85,6 +85,23 @@ describe('sqliteClient schema sync', () => {
         assert.ok(!sqliteClient.getTablesFromDb().includes('provider_settings_old'));
     });
 
+    test('hands data recorded under a former Pickle account to the local user', async () => {
+        sqliteClient.connect(dbPath);
+        await sqliteClient.initTables();
+        const db = sqliteClient.getDb();
+        db.prepare('INSERT INTO users (uid, display_name, email) VALUES (?, ?, ?)').run('fb-uid', 'Someone', 'a@b.c');
+        db.prepare('INSERT INTO sessions (id, uid, title) VALUES (?, ?, ?)').run('s1', 'fb-uid', 'old meeting');
+        db.prepare('INSERT INTO prompt_presets (id, uid, title, prompt, is_default) VALUES (?, ?, ?, ?, 0)').run('p1', 'fb-uid', 'Mine', 'x');
+        db.prepare("INSERT INTO provider_settings (provider, api_key) VALUES ('openai-glass', 'vkey')").run();
+
+        await sqliteClient.initTables();
+
+        assert.equal(db.prepare('SELECT uid FROM sessions WHERE id = ?').get('s1').uid, 'default_user');
+        assert.equal(db.prepare('SELECT uid FROM prompt_presets WHERE id = ?').get('p1').uid, 'default_user');
+        assert.deepEqual(db.prepare('SELECT uid FROM users').all().map(r => r.uid), ['default_user']);
+        assert.equal(db.prepare("SELECT COUNT(*) AS n FROM provider_settings WHERE provider = 'openai-glass'").get().n, 0);
+    });
+
     test('rejects unsafe identifiers', () => {
         assert.throws(() => sqliteClient._validateAndQuoteIdentifier('users; DROP TABLE x'), /Invalid database identifier/);
     });

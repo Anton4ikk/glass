@@ -1,22 +1,8 @@
 'use client'
 
 import { HelpCircle, Book, MessageCircle, Mail } from 'lucide-react'
-import { useRedirectIfNotAuth } from '@/utils/auth'
 
 export default function HelpPage() {
-  const userInfo = useRedirectIfNotAuth()
-
-  if (!userInfo) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="p-8">
       <div className="max-w-4xl mx-auto">
@@ -32,7 +18,7 @@ export default function HelpPage() {
               New to pickleglass? Learn about basic features and setup methods.
             </p>
             <ul className="space-y-2 text-sm text-gray-600">
-              <li>• Setting up personalized contexts</li>
+              <li>• Telling Glass about yourself (Settings → About Me)</li>
               <li>• Selecting presets and creating custom contexts</li>
               <li>• Checking activity records</li>
               <li>• Changing settings</li>
@@ -53,7 +39,7 @@ export default function HelpPage() {
                   How do I change the context?
                 </summary>
                 <p className="text-gray-600 mt-2 pl-4">
-                  On the Personalize page, select a preset or enter a custom context, then click the Save button.
+                  In the desktop app, open Settings → About Me, describe yourself (name, role, what your meetings are about) and click Save. Ask and the live summary use it.
                 </p>
               </details>
               <details className="text-sm">

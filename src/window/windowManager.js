@@ -1,11 +1,11 @@
-const { BrowserWindow, globalShortcut, screen, app, shell } = require('electron');
+const { BrowserWindow, globalShortcut, screen, app } = require('electron');
 const WindowLayoutManager = require('./windowLayoutManager');
 const SmoothMovementManager = require('./smoothMovementManager');
 const path = require('node:path');
 const os = require('os');
 const shortcutsService = require('../features/shortcuts/shortcutsService');
 const internalBridge = require('../bridge/internalBridge');
-const permissionRepository = require('../features/common/repositories/permission');
+const { setStealthCursor, attachStealthCursor } = require('./stealthCursor');
 
 /* ────────────────[ GLASS BYPASS ]─────────────── */
 let liquidGlass;
@@ -245,7 +245,7 @@ function changeAllWindowsVisibility(windowPool, targetVisibility) {
     lastVisibleWindows.forEach(name => {
       const win = windowPool.get(name);
       if (win && !win.isDestroyed())
-        win.show();
+        revealWindow(win);
     });
   }
 
@@ -299,7 +299,7 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
             if (position) {
                 win.setBounds(position);
                 win.__lockedByButton = true;
-                win.show();
+                revealWindow(win);
                 win.moveTop();
                 win.setAlwaysOnTop(true);
             } else {
@@ -380,7 +380,9 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
 
             win.setOpacity(0);
             win.setBounds(startPos);
-            win.show();
+            // Ask focuses its text input, so it needs the keyboard; listen is display-only.
+            if (name === 'ask') win.show();
+            else revealWindow(win);
 
             movementManager.fade(win, { to: 1 });
             movementManager.animateLayout(targetLayout);
@@ -411,8 +413,24 @@ const setContentProtection = (status) => {
     windowPool.forEach(win => {
         if (win && !win.isDestroyed()) {
             win.setContentProtection(isContentProtectionOn);
+            setStealthCursor(win, isContentProtectionOn);
         }
     });
+    internalBridge.emit('window:contentProtectionChanged', { enabled: isContentProtectionOn });
+};
+
+// While invisible, windows that don't need the keyboard appear without taking focus:
+// the meeting app or browser underneath keeps it and sees no blur / focus-loss.
+// Clicking a Glass window still focuses it as usual.
+const revealWindow = (win) => {
+    if (isContentProtectionOn) win.showInactive();
+    else win.show();
+};
+
+// Call right after creating a window, before it is shown.
+const protectWindow = (win) => {
+    win.setContentProtection(isContentProtectionOn);
+    attachStealthCursor(win, () => isContentProtectionOn);
 };
 
 const getContentProtectionStatus = () => isContentProtectionOn;
@@ -421,14 +439,6 @@ const toggleContentProtection = () => {
     const newStatus = !getContentProtectionStatus();
     setContentProtection(newStatus);
     return newStatus;
-};
-
-
-const openLoginPage = () => {
-    const webUrl = process.env.pickleglass_WEB_URL || 'http://localhost:3000';
-    const personalizeUrl = `${webUrl}/personalize?desktop=true`;
-    shell.openExternal(personalizeUrl);
-    console.log('Opening personalization page:', personalizeUrl);
 };
 
 
@@ -461,7 +471,7 @@ function createFeatureWindows(header, namesToCreate) {
                     ...commonChildOptions, width:400,minWidth:400,maxWidth:900,
                     maxHeight:900,
                 });
-                listen.setContentProtection(isContentProtectionOn);
+                protectWindow(listen);
                 listen.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
                 if (process.platform === 'darwin') {
                     listen.setWindowButtonVisibility(false);
@@ -492,7 +502,7 @@ function createFeatureWindows(header, namesToCreate) {
             // ask
             case 'ask': {
                 const ask = new BrowserWindow({ ...commonChildOptions, width:600 });
-                ask.setContentProtection(isContentProtectionOn);
+                protectWindow(ask);
                 ask.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
                 if (process.platform === 'darwin') {
                     ask.setWindowButtonVisibility(false);
@@ -525,7 +535,7 @@ function createFeatureWindows(header, namesToCreate) {
             // settings
             case 'settings': {
                 const settings = new BrowserWindow({ ...commonChildOptions, width:240, maxHeight:400, parent:undefined });
-                settings.setContentProtection(isContentProtectionOn);
+                protectWindow(settings);
                 settings.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
                 if (process.platform === 'darwin') {
                     settings.setWindowButtonVisibility(false);
@@ -567,7 +577,7 @@ function createFeatureWindows(header, namesToCreate) {
                     titleBarOverlay: false,
                 });
 
-                shortcutEditor.setContentProtection(isContentProtectionOn);
+                protectWindow(shortcutEditor);
                 shortcutEditor.setVisibleOnAllWorkspaces(true,{visibleOnFullScreen:true});
                 if (process.platform === 'darwin') {
                     shortcutEditor.setWindowButtonVisibility(false);
@@ -652,6 +662,8 @@ function createWindows() {
         height: HEADER_HEIGHT,
         x: initialX,
         y: initialY,
+        // Shown below, once content protection is on, so it never appears in a capture unprotected.
+        show: false,
         frame: false,
         transparent: true,
         vibrancy: false,
@@ -676,9 +688,12 @@ function createWindows() {
         useContentSize: true,
         disableAutoHideCursor: true,
     });
+    protectWindow(header);
+    header.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     if (process.platform === 'darwin') {
         header.setWindowButtonVisibility(false);
     }
+    revealWindow(header);
     const headerLoadOptions = {};
     if (!shouldUseLiquidGlass) {
         header.loadFile(path.join(__dirname, '../ui/app/header.html'), headerLoadOptions);
@@ -719,9 +734,6 @@ function createWindows() {
         createFeatureWindows(header, ['listen', 'ask', 'settings', 'shortcut-settings']);
     }
 
-    header.setContentProtection(isContentProtectionOn);
-    header.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-    
     // Open DevTools in development
     if (!app.isPackaged && process.env.GLASS_DEVTOOLS === '1') {
         header.webContents.openDevTools({ mode: 'detach' });
@@ -801,7 +813,6 @@ module.exports = {
     showSettingsWindow,
     hideSettingsWindow,
     cancelHideSettingsWindow,
-    openLoginPage,
     moveWindowStep,
     handleHeaderStateChanged,
     handleHeaderAnimationFinished,

@@ -41,12 +41,6 @@ const providerSettingsRepositoryAdapter = {
         return await repo.removeAll();
     },
 
-    async getRawApiKeys() {
-        // This function should always target the local sqlite DB,
-        // as it's part of the local-first boot sequence.
-        return await sqliteRepository.getRawApiKeys();
-    },
-    
     async getActiveProvider(type) {
         const repo = getBaseRepository();
         return await repo.getActiveProvider(type);

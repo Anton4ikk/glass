@@ -1,69 +1,19 @@
 const sqliteRepository = require('./sqlite.repository');
-const firebaseRepository = require('./firebase.repository');
-const authService = require('../../common/services/authService');
-
-function getBaseRepository() {
-    const user = authService.getCurrentUser();
-    if (user && user.isLoggedIn) {
-        return firebaseRepository;
-    }
-    return sqliteRepository;
-}
+const { LOCAL_UID } = require('../../common/config/localUser');
 
 const settingsRepositoryAdapter = {
-    getPresets: () => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().getPresets(uid);
-    },
+    getPresets: () => sqliteRepository.getPresets(LOCAL_UID),
+    getPresetTemplates: () => sqliteRepository.getPresetTemplates(),
+    createPreset: (options) => sqliteRepository.createPreset({ uid: LOCAL_UID, ...options }),
+    updatePreset: (id, options) => sqliteRepository.updatePreset(id, options, LOCAL_UID),
+    deletePreset: (id) => sqliteRepository.deletePreset(id, LOCAL_UID),
 
-    getPresetTemplates: () => {
-        return getBaseRepository().getPresetTemplates();
-    },
-
-    createPreset: (options) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().createPreset({ uid, ...options });
-    },
-
-    updatePreset: (id, options) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().updatePreset(id, options, uid);
-    },
-
-    deletePreset: (id) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().deletePreset(id, uid);
-    },
-
-    getAutoUpdate: () => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().getAutoUpdate(uid);
-    },
-
-    setAutoUpdate: (isEnabled) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().setAutoUpdate(uid, isEnabled);
-    },
-
-    getSttLanguage: () => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().getSttLanguage(uid);
-    },
-
-    setSttLanguage: (language) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().setSttLanguage(uid, language);
-    },
-
-    getAskThinking: () => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().getAskThinking(uid);
-    },
-
-    setAskThinking: (enabled) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().setAskThinking(uid, enabled);
-    },
+    getSttLanguage: () => sqliteRepository.getSttLanguage(LOCAL_UID),
+    setSttLanguage: (language) => sqliteRepository.setSttLanguage(LOCAL_UID, language),
+    getAskThinking: () => sqliteRepository.getAskThinking(LOCAL_UID),
+    setAskThinking: (enabled) => sqliteRepository.setAskThinking(LOCAL_UID, enabled),
+    getAboutMe: () => sqliteRepository.getAboutMe(LOCAL_UID),
+    setAboutMe: (text) => sqliteRepository.setAboutMe(LOCAL_UID, text),
 };
 
 module.exports = settingsRepositoryAdapter;

@@ -6,19 +6,6 @@ appId: com.pickle.glass
 # The user-facing application name
 productName: Glass
 
-# Publish configuration for GitHub releases
-publish:
-    provider: github
-    owner: pickle-com
-    repo: glass
-    releaseType: draft
-
-# Protocols configuration for deep linking
-protocols:
-    name: PickleGlass Protocol
-    schemes: 
-        - pickleglass
-
 # List of files to be included in the app package
 files:
     - src/**/*

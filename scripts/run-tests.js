@@ -1,5 +1,5 @@
 // Runs node:test inside Electron's bundled Node (ELECTRON_RUN_AS_NODE=1).
-// Native modules (better-sqlite3, keytar) are rebuilt for Electron's ABI by
+// Native modules (better-sqlite3) are rebuilt for Electron's ABI by
 // `postinstall`, so the system `node` can't load them; Electron's Node can,
 // and it matches the runtime the app actually ships with.
 //

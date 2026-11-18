@@ -7,13 +7,9 @@ if (require('electron-squirrel-startup')) {
 const { app, BrowserWindow, dialog, desktopCapturer, session } = require('electron');
 const { createWindows } = require('./window/windowManager.js');
 const listenService = require('./features/listen/listenService');
-const { initializeFirebase } = require('./features/common/services/firebaseClient');
 const databaseInitializer = require('./features/common/services/databaseInitializer');
-const authService = require('./features/common/services/authService');
 const path = require('node:path');
 const express = require('express');
-const fetch = require('node-fetch');
-const { autoUpdater } = require('electron-updater');
 const { EventEmitter } = require('events');
 const settingsService = require('./features/settings/settingsService');
 const sessionRepository = require('./features/common/repositories/session');
@@ -27,88 +23,12 @@ const eventBridge = new EventEmitter();
 let WEB_PORT = 3000;
 let isShuttingDown = false; // Flag to prevent infinite shutdown loop
 
-// Read by authService, settingsService and ollamaService, which would otherwise require it in a cycle.
+// Read by settingsService and ollamaService, which would otherwise require it in a cycle.
 global.modelStateService = modelStateService;
 
 // Import and initialize OllamaService
 const ollamaService = require('./features/common/services/ollamaService');
 const ollamaModelRepository = require('./features/common/repositories/ollamaModel');
-
-// Native deep link handling - cross-platform compatible
-let pendingDeepLinkUrl = null;
-
-function setupProtocolHandling() {
-    // Protocol registration - must be done before app is ready
-    try {
-        if (!app.isDefaultProtocolClient('pickleglass')) {
-            const success = app.setAsDefaultProtocolClient('pickleglass');
-            if (success) {
-                console.log('[Protocol] Successfully set as default protocol client for pickleglass://');
-            } else {
-                console.warn('[Protocol] Failed to set as default protocol client - this may affect deep linking');
-            }
-        } else {
-            console.log('[Protocol] Already registered as default protocol client for pickleglass://');
-        }
-    } catch (error) {
-        console.error('[Protocol] Error during protocol registration:', error);
-    }
-
-    // Handle protocol URLs on Windows/Linux
-    app.on('second-instance', (event, commandLine, workingDirectory) => {
-        console.log('[Protocol] Second instance command line:', commandLine);
-        
-        focusMainWindow();
-        
-        let protocolUrl = null;
-        
-        // Search through all command line arguments for a valid protocol URL
-        for (const arg of commandLine) {
-            if (arg && typeof arg === 'string' && arg.startsWith('pickleglass://')) {
-                // Clean up the URL by removing problematic characters
-                const cleanUrl = arg.replace(/[\\₩]/g, '');
-                
-                // Additional validation for Windows
-                if (process.platform === 'win32') {
-                    // On Windows, ensure the URL doesn't contain file path indicators
-                    if (!cleanUrl.includes(':') || cleanUrl.indexOf('://') === cleanUrl.lastIndexOf(':')) {
-                        protocolUrl = cleanUrl;
-                        break;
-                    }
-                } else {
-                    protocolUrl = cleanUrl;
-                    break;
-                }
-            }
-        }
-        
-        if (protocolUrl) {
-            console.log('[Protocol] Valid URL found from second instance:', protocolUrl);
-            handleCustomUrl(protocolUrl);
-        } else {
-            console.log('[Protocol] No valid protocol URL found in command line arguments');
-            console.log('[Protocol] Command line args:', commandLine);
-        }
-    });
-
-    // Handle protocol URLs on macOS
-    app.on('open-url', (event, url) => {
-        event.preventDefault();
-        console.log('[Protocol] Received URL via open-url:', url);
-        
-        if (!url || !url.startsWith('pickleglass://')) {
-            console.warn('[Protocol] Invalid URL format:', url);
-            return;
-        }
-
-        if (app.isReady()) {
-            handleCustomUrl(url);
-        } else {
-            pendingDeepLinkUrl = url;
-            console.log('[Protocol] App not ready, storing URL for later');
-        }
-    });
-}
 
 function focusMainWindow() {
     const { windowPool } = require('./window/windowManager.js');
@@ -135,31 +55,14 @@ function focusMainWindow() {
     return false;
 }
 
-if (process.platform === 'win32') {
-    for (const arg of process.argv) {
-        if (arg && typeof arg === 'string' && arg.startsWith('pickleglass://')) {
-            // Clean up the URL by removing problematic characters (korean characters issue...)
-            const cleanUrl = arg.replace(/[\\₩]/g, '');
-            
-            if (!cleanUrl.includes(':') || cleanUrl.indexOf('://') === cleanUrl.lastIndexOf(':')) {
-                console.log('[Protocol] Found protocol URL in initial arguments:', cleanUrl);
-                pendingDeepLinkUrl = cleanUrl;
-                break;
-            }
-        }
-    }
-    
-    console.log('[Protocol] Initial process.argv:', process.argv);
-}
-
 const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
     app.quit();
     process.exit(0);
 }
 
-// setup protocol after single instance lock
-setupProtocolHandling();
+// A second launch just brings the running instance forward.
+app.on('second-instance', () => focusMainWindow());
 
 app.whenReady().then(async () => {
 
@@ -177,15 +80,12 @@ app.whenReady().then(async () => {
         });
     });
 
-    // Initialize core services
-    initializeFirebase();
-    
     try {
         await databaseInitializer.initialize();
         console.log('>>> [index.js] Database initialized successfully');
         
-        // Also ends zombie sessions left by a previous run.
-        await authService.initialize();
+        // End zombie sessions left by a previous run.
+        await sessionRepository.endAllActiveSessions();
         await modelStateService.initialize();
 
         featureBridge.initialize();
@@ -222,16 +122,6 @@ app.whenReady().then(async () => {
             'A critical error occurred during startup. Some features might be disabled. Please restart the application.'
         );
     }
-
-    // initAutoUpdater should be called after auth is initialized
-    initAutoUpdater();
-
-    // Process any pending deep link after everything is initialized
-    if (pendingDeepLinkUrl) {
-        console.log('[Protocol] Processing pending URL:', pendingDeepLinkUrl);
-        handleCustomUrl(pendingDeepLinkUrl);
-        pendingDeepLinkUrl = null;
-    }
 });
 
 const SHUTDOWN_STEP_TIMEOUT_MS = 5000;
@@ -259,10 +149,11 @@ app.on('before-quit', async (event) => {
 
         // 1. Stop audio capture first (immediate)
         await listenService.closeSession();
+        // The model stays loaded for a few seconds after Stop; don't leave it behind.
+        require('./features/common/services/whisperServer').killAll();
         console.log('[Shutdown] Audio capture stopped');
         
         // 2. End all active sessions (database operations) - with error handling.
-        // Capped: an offline Firestore commit would otherwise block quitting forever.
         try {
             await withTimeout(sessionRepository.endAllActiveSessions(), SHUTDOWN_STEP_TIMEOUT_MS);
             console.log('[Shutdown] Active sessions ended');
@@ -323,12 +214,10 @@ function setupWebDataHandlers() {
     const sttRepository = require('./features/listen/stt/repositories');
     const summaryRepository = require('./features/listen/summary/repositories');
     const askRepository = require('./features/ask/repositories');
-    const userRepository = require('./features/common/repositories/user');
     const presetRepository = require('./features/common/repositories/preset');
 
     const handleRequest = async (channel, responseChannel, payload) => {
         let result;
-        // const currentUserId = authService.getCurrentUserId(); // No longer needed here
         try {
             switch (channel) {
                 // SESSION
@@ -363,18 +252,7 @@ function setupWebDataHandlers() {
                     break;
                 }
                 
-                // USER
-                case 'get-user-profile':
-                    // Adapter injects UID
-                    result = await userRepository.getById();
-                    break;
-                case 'update-user-profile':
-                     // Adapter injects UID
-                    result = await userRepository.update(payload);
-                    break;
-                case 'find-or-create-user':
-                    result = await userRepository.findOrCreate(payload);
-                    break;
+                // API KEYS
                 case 'save-api-key':
                     // Use ModelStateService as the single source of truth for API key management
                     result = await modelStateService.setApiKey(payload.provider, payload.apiKey);
@@ -385,11 +263,6 @@ function setupWebDataHandlers() {
                     result = { hasApiKey };
                     break;
                 }
-                case 'delete-account':
-                    // Adapter injects UID
-                    result = await userRepository.deleteById();
-                    break;
-
                 // PRESET
                 case 'get-presets':
                     // Adapter injects UID
@@ -411,34 +284,6 @@ function setupWebDataHandlers() {
                     settingsService.notifyPresetUpdate('deleted', payload);
                     break;
                 
-                // BATCH
-                case 'get-batch-data': {
-                    const includes = payload ? payload.split(',').map(item => item.trim()) : ['profile', 'presets', 'sessions'];
-                    const promises = {};
-            
-                    if (includes.includes('profile')) {
-                        // Adapter injects UID
-                        promises.profile = userRepository.getById();
-                    }
-                    if (includes.includes('presets')) {
-                        // Adapter injects UID
-                        promises.presets = presetRepository.getPresets();
-                    }
-                    if (includes.includes('sessions')) {
-                        // Adapter injects UID
-                        promises.sessions = sessionRepository.getAllByUserId();
-                    }
-                    
-                    const batchResult = {};
-                    const promiseResults = await Promise.all(Object.values(promises));
-                    Object.keys(promises).forEach((key, index) => {
-                        batchResult[key] = promiseResults[index];
-                    });
-
-                    result = batchResult;
-                    break;
-                }
-
                 default:
                     throw new Error(`Unknown web data channel: ${channel}`);
             }
@@ -451,150 +296,6 @@ function setupWebDataHandlers() {
     
     eventBridge.on('web-data-request', handleRequest);
 }
-
-async function handleCustomUrl(url) {
-    try {
-        console.log('[Custom URL] Processing URL:', url);
-        
-        // Validate and clean URL
-        if (!url || typeof url !== 'string' || !url.startsWith('pickleglass://')) {
-            console.error('[Custom URL] Invalid URL format:', url);
-            return;
-        }
-        
-        // Clean up URL by removing problematic characters
-        const cleanUrl = url.replace(/[\\₩]/g, '');
-        
-        // Additional validation
-        if (cleanUrl !== url) {
-            console.log('[Custom URL] Cleaned URL from:', url, 'to:', cleanUrl);
-            url = cleanUrl;
-        }
-        
-        const urlObj = new URL(url);
-        const action = urlObj.hostname;
-        const params = Object.fromEntries(urlObj.searchParams);
-        
-        console.log('[Custom URL] Action:', action, 'Params:', params);
-
-        switch (action) {
-            case 'login':
-            case 'auth-success':
-                await handleFirebaseAuthCallback(params);
-                break;
-            case 'personalize':
-                handlePersonalizeFromUrl(params);
-                break;
-            default: {
-                const { windowPool } = require('./window/windowManager.js');
-                const header = windowPool.get('header');
-                if (header) {
-                    if (header.isMinimized()) header.restore();
-                    header.focus();
-
-                    const targetUrl = `http://localhost:${WEB_PORT}/${action}`;
-                    console.log(`[Custom URL] Navigating webview to: ${targetUrl}`);
-                    header.webContents.loadURL(targetUrl);
-                }
-            }
-        }
-
-    } catch (error) {
-        console.error('[Custom URL] Error parsing URL:', error);
-    }
-}
-
-async function handleFirebaseAuthCallback(params) {
-    const userRepository = require('./features/common/repositories/user');
-    const { token: idToken } = params;
-
-    if (!idToken) {
-        console.error('[Auth] Firebase auth callback is missing ID token.');
-        // No need to send IPC, the UI won't transition without a successful auth state change.
-        return;
-    }
-
-    console.log('[Auth] Received ID token from deep link, exchanging for custom token...');
-
-    try {
-        const functionUrl = 'https://us-west1-pickle-3651a.cloudfunctions.net/pickleGlassAuthCallback';
-        const response = await fetch(functionUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ token: idToken })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok || !data.success) {
-            throw new Error(data.error || 'Failed to exchange token.');
-        }
-
-        const { customToken, user } = data;
-        console.log('[Auth] Successfully received custom token for user:', user.uid);
-
-        const firebaseUser = {
-            uid: user.uid,
-            email: user.email || 'no-email@example.com',
-            displayName: user.name || 'User',
-            photoURL: user.picture
-        };
-
-        // 1. Sync user data to local DB
-        userRepository.findOrCreate(firebaseUser);
-        console.log('[Auth] User data synced with local DB.');
-
-        // 2. Sign in using the authService in the main process
-        await authService.signInWithCustomToken(customToken);
-        console.log('[Auth] Main process sign-in initiated. Waiting for onAuthStateChanged...');
-
-        // 3. Focus the app window
-        const { windowPool } = require('./window/windowManager.js');
-        const header = windowPool.get('header');
-        if (header) {
-            if (header.isMinimized()) header.restore();
-            header.focus();
-        } else {
-            console.error('[Auth] Header window not found after auth callback.');
-        }
-        
-    } catch (error) {
-        console.error('[Auth] Error during custom token exchange or sign-in:', error);
-        // The UI will not change, and the user can try again.
-        // Optionally, send a generic error event to the renderer.
-        const { windowPool } = require('./window/windowManager.js');
-        const header = windowPool.get('header');
-        if (header) {
-            header.webContents.send('auth-failed', { message: error.message });
-        }
-    }
-}
-
-function handlePersonalizeFromUrl(params) {
-    console.log('[Custom URL] Personalize params:', params);
-    
-    const { windowPool } = require('./window/windowManager.js');
-    const header = windowPool.get('header');
-    
-    if (header) {
-        if (header.isMinimized()) header.restore();
-        header.focus();
-        
-        const personalizeUrl = `http://localhost:${WEB_PORT}/settings`;
-        console.log(`[Custom URL] Navigating to personalize page: ${personalizeUrl}`);
-        header.webContents.loadURL(personalizeUrl);
-        
-        BrowserWindow.getAllWindows().forEach(win => {
-            win.webContents.send('enter-personalize-mode', {
-                message: 'Personalization mode activated',
-                params: params
-            });
-        });
-    } else {
-        console.error('[Custom URL] Header window not found for personalize');
-    }
-}
-
 
 async function startWebStack() {
   console.log('NODE_ENV =', process.env.NODE_ENV); 
@@ -701,36 +402,3 @@ async function startWebStack() {
   return frontendPort;
 }
 
-// Auto-update initialization
-async function initAutoUpdater() {
-    if (process.env.NODE_ENV === 'development') return;
-
-    try {
-        // The Settings toggle was never read here.
-        const settingsService = require('./features/settings/settingsService');
-        if (!(await settingsService.getAutoUpdateSetting())) {
-            console.log('[AutoUpdater] Disabled in settings.');
-            return;
-        }
-
-        // Listeners first: checkForUpdates() emits 'update-available' before it resolves.
-        autoUpdater.on('update-available', () => autoUpdater.downloadUpdate());
-        autoUpdater.on('update-downloaded', (event, releaseNotes, releaseName) => {
-            dialog.showMessageBox({
-                type: 'info',
-                title: 'Application Update',
-                message: `A new version of PickleGlass (${releaseName}) has been downloaded. It will be installed the next time you launch the application.`,
-                buttons: ['Restart', 'Later']
-            }).then(response => {
-                if (response.response === 0) {
-                    autoUpdater.quitAndInstall();
-                }
-            });
-        });
-        autoUpdater.on('error', err => console.error('[AutoUpdater] Error:', err));
-
-        await autoUpdater.checkForUpdates();
-    } catch (err) {
-        console.error('[AutoUpdater] Error initializing auto-updater:', err);
-    }
-}

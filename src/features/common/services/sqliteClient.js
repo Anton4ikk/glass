@@ -1,12 +1,13 @@
 const Database = require('better-sqlite3');
 const path = require('path');
 const LATEST_SCHEMA = require('../config/schema');
+const { LOCAL_UID } = require('../config/localUser');
 
 class SQLiteClient {
     constructor() {
         this.db = null;
         this.dbPath = null;
-        this.defaultUserId = 'default_user';
+        this.defaultUserId = LOCAL_UID;
     }
 
     connect(dbPath) {
@@ -209,6 +210,23 @@ class SQLiteClient {
     async initTables() {
         await this.synchronizeSchema();
         this.initDefaultData();
+        this._adoptAccountData();
+    }
+
+    // Glass used to support Pickle accounts: data recorded while signed in was
+    // stored under the account's uid. Accounts are gone, so hand those rows to
+    // the local user and drop what only made sense with an account.
+    _adoptAccountData() {
+        const uid = this.defaultUserId;
+        this.db.transaction(() => {
+            const sessions = this.db.prepare('UPDATE sessions SET uid = ? WHERE uid <> ?').run(uid, uid).changes;
+            const presets = this.db.prepare('UPDATE prompt_presets SET uid = ? WHERE uid <> ?').run(uid, uid).changes;
+            this.db.prepare('DELETE FROM users WHERE uid <> ?').run(uid);
+            this.db.prepare("DELETE FROM provider_settings WHERE provider = 'openai-glass'").run();
+            if (sessions || presets) {
+                console.log(`[DB] Moved ${sessions} session(s) and ${presets} preset(s) from former accounts to the local user.`);
+            }
+        })();
     }
 
     initDefaultData() {
@@ -218,7 +236,7 @@ class SQLiteClient {
             VALUES (?, ?, ?, ?)
         `;
 
-        this.db.prepare(initUserQuery).run(this.defaultUserId, 'Default User', 'contact@pickle.com', now);
+        this.db.prepare(initUserQuery).run(this.defaultUserId, 'Local User', 'local', now);
 
         const defaultPresets = [
             ['school', 'School', 'You are a school and lecture assistant. Your goal is to help the user, a student, understand academic material and answer questions.\n\nWhenever a question appears on the user\'s screen or is asked aloud, you provide a direct, step-by-step answer, showing all necessary reasoning or calculations.\n\nIf the user is watching a lecture or working through new material, you offer concise explanations of key concepts and clarify definitions as they come up.', 1],

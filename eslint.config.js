@@ -35,7 +35,7 @@ module.exports = [
         },
     },
 
-    // Main process, services, bridges, web backend, Firebase functions, build scripts, tests.
+    // Main process, services, bridges, web backend, build scripts, tests.
     {
         files: ['**/*.js'],
         ignores: ['src/ui/**'],

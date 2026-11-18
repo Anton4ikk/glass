@@ -118,7 +118,7 @@ export default function SearchPopup({ isOpen, onClose }: SearchPopupProps) {
                       key={result.id}
                       className="p-3 hover:bg-gray-50 cursor-pointer transition-colors"
                       onClick={() => {
-                        router.push(`/activity/${result.id}`)
+                        router.push(`/activity/details?sessionId=${result.id}`)
                         onClose()
                       }}
                     >

@@ -2,16 +2,13 @@
 
 import { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { useRedirectIfNotAuth } from '@/utils/auth'
 import {
-  UserProfile,
   Session,
   getSessions,
   deleteSession,
 } from '@/utils/api'
 
 export default function ActivityPage() {
-  const userInfo = useRedirectIfNotAuth() as UserProfile | null;
   const [sessions, setSessions] = useState<Session[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -30,17 +27,6 @@ export default function ActivityPage() {
   useEffect(() => {
     fetchSessions()
   }, [])
-
-  if (!userInfo) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
-  }
 
   const getGreeting = () => {
     const hour = new Date().getHours()
@@ -68,7 +54,7 @@ export default function ActivityPage() {
       <div className="max-w-4xl mx-auto px-8 py-12">
         <div className="text-center mb-12">
           <h1 className="text-2xl text-gray-600">
-            {getGreeting()}, {userInfo.display_name}
+            {getGreeting()}
           </h1>
         </div>
         <div>

@@ -1,16 +1,10 @@
 const { systemPreferences, shell, desktopCapturer } = require('electron');
-const permissionRepository = require('../repositories/permission');
 
 class PermissionService {
-  _getAuthService() {
-    return require('./authService');
-  }
-
   async checkSystemPermissions() {
     const permissions = {
       microphone: 'unknown',
       screen: 'unknown',
-      keychain: 'unknown',
       needsSetup: true
     };
 
@@ -18,12 +12,10 @@ class PermissionService {
       if (process.platform === 'darwin') {
         permissions.microphone = systemPreferences.getMediaAccessStatus('microphone');
         permissions.screen = systemPreferences.getMediaAccessStatus('screen');
-        permissions.keychain = await this.checkKeychainCompleted(this._getAuthService().getCurrentUserId()) ? 'granted' : 'unknown';
-        permissions.needsSetup = permissions.microphone !== 'granted' || permissions.screen !== 'granted' || permissions.keychain !== 'granted';
+        permissions.needsSetup = permissions.microphone !== 'granted' || permissions.screen !== 'granted';
       } else {
         permissions.microphone = 'granted';
         permissions.screen = 'granted';
-        permissions.keychain = 'granted';
         permissions.needsSetup = false;
       }
 
@@ -34,8 +26,7 @@ class PermissionService {
       return {
         microphone: 'unknown',
         screen: 'unknown',
-        keychain: 'unknown',
-        needsSetup: true,
+          needsSetup: true,
         error: error.message
       };
     }
@@ -94,31 +85,6 @@ class PermissionService {
     } catch (error) {
       console.error('[Permissions] Error opening system preferences:', error);
       return { success: false, error: error.message };
-    }
-  }
-
-  async markKeychainCompleted() {
-    try {
-      await permissionRepository.markKeychainCompleted(this._getAuthService().getCurrentUserId());
-      console.log('[Permissions] Marked keychain as completed');
-      return { success: true };
-    } catch (error) {
-      console.error('[Permissions] Error marking keychain as completed:', error);
-      return { success: false, error: error.message };
-    }
-  }
-
-  async checkKeychainCompleted(uid) {
-    if (uid === "default_user") {
-      return true;
-    }
-    try {
-      const completed = permissionRepository.checkKeychainCompleted(uid);
-      console.log('[Permissions] Keychain completed status:', completed);
-      return completed;
-    } catch (error) {
-      console.error('[Permissions] Error checking keychain completed status:', error);
-      return false;
     }
   }
 }

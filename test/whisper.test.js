@@ -126,3 +126,60 @@ describe('WhisperSTTSession.close', () => {
         assert.deepEqual(processed, []);
     });
 });
+
+describe('WhisperSTTSession with whisper-server', () => {
+    function serverSession(server) {
+        const calls = { cli: 0 };
+        const service = {
+            ensureModelAvailable: async () => {},
+            createWavHeader: () => Buffer.alloc(44),
+            logTranscription: async () => {},
+        };
+        const session = new WhisperSTTSession('whisper-medium', service, 'test', 'ru');
+        session.isRunning = true;
+        session.server = server;
+        session._transcribeWithCli = async () => {
+            calls.cli++;
+            return { code: 0, output: 'из cli', errorOutput: '' };
+        };
+        const texts = [];
+        session.on('transcription', m => texts.push(m.text));
+        return { session, calls, texts };
+    }
+
+    test('an utterance goes to the loaded server, not to a new whisper-cli run', async () => {
+        const sent = [];
+        const { session, calls, texts } = serverSession({
+            transcribe: async (wav, language) => {
+                sent.push([wav.length, language]);
+                return ' Как развернуть связный список?\n';
+            },
+            release() {},
+        });
+        await session._runWhisper(pcm(1, 0.5));
+        assert.deepEqual(texts, ['Как развернуть связный список?']);
+        assert.deepEqual(sent, [[44 + BYTES_PER_SECOND, 'ru']]);
+        assert.equal(calls.cli, 0);
+        assert.equal(session.isProcessing, false);
+    });
+
+    test('falls back to whisper-cli when the server request fails', async () => {
+        const { session, calls, texts } = serverSession({
+            transcribe: async () => {
+                throw new Error('ECONNREFUSED');
+            },
+            release() {},
+        });
+        await session._runWhisper(pcm(1, 0.5));
+        assert.equal(calls.cli, 1);
+        assert.deepEqual(texts, ['из cli']);
+    });
+
+    test('close() releases the shared server', async () => {
+        let released = 0;
+        const { session } = serverSession({ transcribe: async () => '', release: () => released++ });
+        await session.close();
+        assert.equal(released, 1);
+        assert.equal(session.server, null);
+    });
+});

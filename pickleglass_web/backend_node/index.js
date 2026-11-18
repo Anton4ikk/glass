@@ -1,8 +1,9 @@
 const express = require('express');
 const cors = require('cors');
-// const db = require('./db'); // No longer needed
-const { identifyUser } = require('./middleware/auth');
 
+// Local API for the web dashboard. It runs inside the Electron main process and
+// never touches the database itself: routes forward requests over the in-process
+// event bridge (see ipcBridge.js), answered by setupWebDataHandlers() in src/index.js.
 function createApp(eventBridge) {
     const app = express();
 
@@ -25,38 +26,9 @@ function createApp(eventBridge) {
         next();
     });
 
-    app.use('/api', identifyUser);
-
-    app.use('/api/auth', require('./routes/auth'));
-    app.use('/api/user', require('./routes/user'));
+    app.use('/api/settings', require('./routes/settings'));
     app.use('/api/conversations', require('./routes/conversations'));
     app.use('/api/presets', require('./routes/presets'));
-
-    app.get('/api/sync/status', (req, res) => {
-        res.json({
-            status: 'online',
-            timestamp: new Date().toISOString(),
-            version: '1.0.0'
-        });
-    });
-
-    app.post('/api/desktop/set-user', (req, res) => {
-        res.json({
-            success: true,
-            message: "Direct IPC communication is now used. This endpoint is deprecated.",
-            user: req.body,
-            deprecated: true
-        });
-    });
-
-    app.get('/api/desktop/status', (req, res) => {
-        res.json({
-            connected: true,
-            current_user: null,
-            communication_method: "IPC",
-            file_based_deprecated: true
-        });
-    });
 
     return app;
 }

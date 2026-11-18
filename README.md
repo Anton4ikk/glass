@@ -148,7 +148,6 @@ This is a personal fork of [pickle-com/glass](https://github.com/pickle-com/glas
   - **System audio (their)**: threshold `0.05`, silence `1000ms`, prefix padding `500ms`, no noise reduction
 - Forced `input_audio_buffer.commit` every 3 seconds for system audio to avoid stuck transcriptions
 - Added `keepAlive()` ping method to prevent WebSocket idle timeouts
-- Portkey virtual key routing support (`usePortkey` flag)
 - Model: `gpt-4o-mini-transcribe`
 
 #### 🔊 Audio Capture — Gain Boost & Diagnostics
@@ -162,6 +161,11 @@ This is a personal fork of [pickle-com/glass](https://github.com/pickle-com/glas
 
 #### 🌍 Multilingual Summaries
 - Summary prompt updated to instruct the model to respond in the **same language as the conversation** (French, English, etc.)
+
+#### 🔒 Local-only, no accounts
+- Removed the Pickle Glass account entirely: Firebase auth and Firestore sync, the "Pickle's key" (`openai-glass` provider via Portkey virtual keys), data encryption + Keychain step, login/logout UI, the `pickleglass://` deep link, the web dashboard's login/profile/billing pages and `functions/` (Cloud Functions)
+- All data stays in the local SQLite database under one local user; sessions recorded while signed in to an account are moved to the local user on startup
+- First launch goes straight to API key / local model setup
 
 #### 🛠 Developer Experience
 - DevTools no longer open automatically in dev builds — now controlled by the `GLASS_DEVTOOLS` environment variable:

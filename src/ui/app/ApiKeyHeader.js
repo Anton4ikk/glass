@@ -22,7 +22,6 @@ export class ApiKeyHeader extends LitElement {
         whisperModels: { type: Array, state: true },
         isSttModelDropdownOpen: { type: Boolean, state: true },
         sttLanguage: { type: String, state: true },
-        backCallback: { type: Function },
         llmError: { type: String },
         sttError: { type: String },
     };
@@ -88,38 +87,6 @@ export class ApiKeyHeader extends LitElement {
         .close-button:hover {
             background: rgba(255, 255, 255, 0.2);
             color: rgba(255, 255, 255, 0.9);
-        }
-        .back-button {
-            -webkit-app-region: no-drag;
-            padding: 8px;
-            left: 0px;
-            top: -7px;
-            position: absolute;
-            background: rgba(132.6, 132.6, 132.6, 0.8);
-            border-radius: 16px;
-            border: 0.5px solid rgba(255, 255, 255, 0.5);
-            justify-content: center;
-            align-items: center;
-            gap: 4px;
-            display: flex;
-            cursor: pointer;
-            transition: background-color 0.2s ease;
-        }
-        .back-button:hover {
-            background: rgba(150, 150, 150, 0.9);
-        }
-        .arrow-icon-left {
-            border: solid #dcdcdc;
-            border-width: 0 1.2px 1.2px 0;
-            display: inline-block;
-            padding: 3px;
-            transform: rotate(135deg);
-        }
-        .back-button-text {
-            color: white;
-            font-size: 12px;
-            font-weight: 500;
-            padding-right: 4px;
         }
         .title {
             color: white;
@@ -476,7 +443,6 @@ export class ApiKeyHeader extends LitElement {
         this.whisperModels = [];
         this.isSttModelDropdownOpen = false;
         this.sttLanguage = 'en';
-        this.backCallback = () => {};
         this.llmError = '';
         this.sttError = '';
 
@@ -530,7 +496,6 @@ export class ApiKeyHeader extends LitElement {
         this.handleMessageFadeEnd = this.handleMessageFadeEnd.bind(this);
         this.handleModelKeyPress = this.handleModelKeyPress.bind(this);
         this.handleSttModelChange = this.handleSttModelChange.bind(this);
-        this.handleBack = this.handleBack.bind(this);
         this.handleClose = this.handleClose.bind(this);
     }
 
@@ -548,12 +513,6 @@ export class ApiKeyHeader extends LitElement {
         this.requestUpdate();
     }
 
-    handleBack() {
-        if (this.backCallback) {
-            this.backCallback();
-        }
-    }
-
     async loadProviderConfig() {
         if (!window.api?.apiKeyHeader) return;
 
@@ -567,8 +526,6 @@ export class ApiKeyHeader extends LitElement {
             const sttProviders = [];
 
             for (const id in config) {
-                // 'openai-glass' 같은 가상 Provider는 UI에 표시하지 않음
-                if (id.includes('-glass')) continue;
                 const hasLlmModels = config[id].llmModels.length > 0 || id === 'ollama';
                 const hasSttModels = config[id].sttModels.length > 0 || id === 'whisper';
 
@@ -625,7 +582,7 @@ export class ApiKeyHeader extends LitElement {
             if (!selected) return;
 
             const providerOf = (modelId, listKey) =>
-                Object.keys(config).find(id => !id.includes('-glass') && config[id][listKey]?.some(m => m.id === modelId));
+                Object.keys(config).find(id => config[id][listKey]?.some(m => m.id === modelId));
 
             if (selected.llm) {
                 this.selectedLlmModel = selected.llm;
@@ -1922,32 +1879,15 @@ export class ApiKeyHeader extends LitElement {
             return;
         }
 
-        window.api.common
-            .getCurrentUser()
-            .then(userState => {
-                console.log('[ApiKeyHeader] handleAnimationEnd: User state retrieved:', userState);
-
-                // Additional validation for local providers
-                return window.api.apiKeyHeader.areProvidersConfigured().then(isConfigured => {
-                    console.log('[ApiKeyHeader] handleAnimationEnd: Providers configured check:', isConfigured);
-
-                    if (!isConfigured) {
-                        console.warn('[ApiKeyHeader] handleAnimationEnd: Providers still not configured, may return to ApiKey screen');
-                    }
-
-                    // Call the state update callback
-                    this.stateUpdateCallback(userState);
-                });
-            })
-            .catch(error => {
-                console.error('[ApiKeyHeader] handleAnimationEnd: Error during state transition:', error);
-
-                // Fallback: try to call callback with minimal state
-                if (this.stateUpdateCallback) {
-                    console.log('[ApiKeyHeader] handleAnimationEnd: Attempting fallback state transition...');
-                    this.stateUpdateCallback({ isLoggedIn: false });
+        window.api.apiKeyHeader
+            .areProvidersConfigured()
+            .then(isConfigured => {
+                if (!isConfigured) {
+                    console.warn('[ApiKeyHeader] handleAnimationEnd: Providers still not configured, may return to ApiKey screen');
                 }
-            });
+            })
+            .catch(error => console.error('[ApiKeyHeader] handleAnimationEnd: Error checking providers:', error))
+            .finally(() => this.stateUpdateCallback());
     }
     //////// after_modelStateService ////////
 
@@ -2204,10 +2144,6 @@ export class ApiKeyHeader extends LitElement {
             <div class="container">
                 <button class="close-button" @click=${this.handleClose}>×</button>
                 <div class="header">
-                    <div class="back-button" @click=${this.handleBack}>
-                        <i class="arrow-icon-left"></i>
-                        <div class="back-button-text">Back</div>
-                    </div>
                     <div class="title">Use Personal API keys</div>
                 </div>
 

@@ -1,6 +1,9 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 // import { getOllamaProgressTracker } from '../../features/common/services/localProgressTracker.js'; // 제거됨
 
+// Mirrors MAX_ABOUT_ME_LENGTH in features/common/prompts/aboutMe.js.
+const ABOUT_ME_MAX_LENGTH = 4000;
+
 export class SettingsView extends LitElement {
     static styles = css`
         * {
@@ -94,12 +97,6 @@ export class SettingsView extends LitElement {
             font-weight: 500;
             color: white;
             margin: 0 0 4px 0;
-        }
-
-        .account-info {
-            font-size: 11px;
-            color: rgba(255, 255, 255, 0.7);
-            margin: 0;
         }
 
         .invisibility-icon {
@@ -222,7 +219,7 @@ export class SettingsView extends LitElement {
             border-color: rgba(255, 59, 48, 0.4);
         }
 
-        .move-buttons, .bottom-buttons {
+        .move-buttons {
             display: flex;
             gap: 4px;
         }
@@ -248,112 +245,57 @@ export class SettingsView extends LitElement {
             color: rgba(255, 255, 255, 0.4);
         }
 
-        /* Preset Management Section */
-        .preset-section {
-            padding: 6px 0;
-            border-top: 1px solid rgba(255, 255, 255, 0.1);
-        }
-
-        .preset-header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 4px;
-        }
-
-        .preset-title {
-            font-size: 11px;
-            font-weight: 500;
-            color: white;
-        }
-
-        .preset-count {
-            font-size: 9px;
-            color: rgba(255, 255, 255, 0.5);
-            margin-left: 4px;
-        }
-
-        .preset-toggle {
-            font-size: 10px;
-            color: rgba(255, 255, 255, 0.6);
-            cursor: pointer;
-            padding: 2px 4px;
-            border-radius: 2px;
-            transition: background-color 0.15s ease;
-        }
-
-        .preset-toggle:hover {
-            background: rgba(255, 255, 255, 0.1);
-        }
-
-        .preset-list {
+        /* About Me sub-page */
+        .about-me-section {
             display: flex;
             flex-direction: column;
-            gap: 2px;
-            max-height: 120px;
-            overflow-y: auto;
+            gap: 6px;
+            padding: 8px 0;
+            position: relative;
+            z-index: 1;
         }
 
-        .preset-item {
+        .about-me-hint {
+            margin: 0;
+            font-size: 10px;
+            line-height: 1.4;
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .about-me-input {
+            width: 100%;
+            min-height: 180px;
+            resize: vertical;
+            box-sizing: border-box;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            color: white;
+            padding: 6px 8px;
+            font-size: 11px;
+            line-height: 1.4;
+            font-family: inherit;
+        }
+
+        .about-me-input:focus {
+            outline: none;
+            border-color: rgba(0, 122, 255, 0.6);
+        }
+
+        .about-me-input::placeholder {
+            color: rgba(255, 255, 255, 0.35);
+        }
+
+        .about-me-footer {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 4px 6px;
-            background: rgba(255, 255, 255, 0.05);
-            border-radius: 3px;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            font-size: 11px;
-            border: 1px solid transparent;
+            gap: 8px;
         }
 
-        .preset-item:hover {
-            background: rgba(255, 255, 255, 0.1);
-            border-color: rgba(255, 255, 255, 0.1);
-        }
-
-        .preset-item.selected {
-            background: rgba(0, 122, 255, 0.25);
-            border-color: rgba(0, 122, 255, 0.6);
-            box-shadow: 0 0 0 1px rgba(0, 122, 255, 0.3);
-        }
-
-        .preset-name {
-            color: white;
-            flex: 1;
-            text-overflow: ellipsis;
-            overflow: hidden;
-            white-space: nowrap;
-            font-weight: 300;
-        }
-
-        .preset-item.selected .preset-name {
-            font-weight: 500;
-        }
-
-        .preset-status {
-            font-size: 9px;
-            color: rgba(0, 122, 255, 0.8);
-            font-weight: 500;
-            margin-left: 6px;
-        }
-
-        .no-presets-message {
-            padding: 12px 8px;
-            text-align: center;
-            color: rgba(255, 255, 255, 0.5);
+        .about-me-status {
             font-size: 10px;
-            line-height: 1.4;
-        }
-
-        .no-presets-message .web-link {
-            color: rgba(0, 122, 255, 0.8);
-            text-decoration: underline;
-            cursor: pointer;
-        }
-
-        .no-presets-message .web-link:hover {
-            color: rgba(0, 122, 255, 1);
+            color: rgba(255, 255, 255, 0.5);
         }
 
         .loading-state {
@@ -377,6 +319,87 @@ export class SettingsView extends LitElement {
 
         .hidden {
             display: none;
+        }
+
+        /* Rows that open a sub-page (API keys, shortcuts). */
+        .nav-section {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            padding: 6px 0;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .nav-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            color: white;
+            padding: 5px 10px;
+            font-size: 11px;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+
+        .nav-row:hover {
+            background: rgba(255, 255, 255, 0.15);
+            border-color: rgba(255, 255, 255, 0.3);
+        }
+
+        .nav-row-meta {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 10px;
+        }
+
+        .nav-chevron {
+            font-size: 13px;
+            line-height: 1;
+            color: rgba(255, 255, 255, 0.7);
+        }
+
+        .subpage-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            position: relative;
+            z-index: 1;
+        }
+
+        .back-button {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 4px;
+            color: white;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-family: inherit;
+            cursor: pointer;
+        }
+
+        .back-button:hover {
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .subpage-title {
+            font-size: 13px;
+            font-weight: 500;
+            margin: 0;
+        }
+
+        /* The sub-page header already draws the divider. */
+        .subpage .api-key-section,
+        .subpage .buttons-section {
+            border-top: none;
         }
 
         .api-key-section, .model-selection-section {
@@ -518,7 +541,6 @@ export class SettingsView extends LitElement {
     //////// after_modelStateService ////////
     static properties = {
         shortcuts: { type: Object, state: true },
-        firebaseUser: { type: Object, state: true },
         isLoading: { type: Boolean, state: true },
         isContentProtectionOn: { type: Boolean, state: true },
         saving: { type: Boolean, state: true },
@@ -530,11 +552,11 @@ export class SettingsView extends LitElement {
         selectedStt: { type: String, state: true },
         isLlmListVisible: { type: Boolean },
         isSttListVisible: { type: Boolean },
-        presets: { type: Array, state: true },
-        selectedPreset: { type: Object, state: true },
-        showPresets: { type: Boolean, state: true },
-        autoUpdateEnabled: { type: Boolean, state: true },
-        autoUpdateLoading: { type: Boolean, state: true },
+        // About Me: the stored text and the textarea's unsaved copy.
+        aboutMe: { type: String, state: true },
+        aboutMeDraft: { type: String, state: true },
+        aboutMeSaving: { type: Boolean, state: true },
+        aboutMeStatus: { type: String, state: true },
         // Ollama related properties
         ollamaStatus: { type: Object, state: true },
         ollamaModels: { type: Array, state: true },
@@ -543,6 +565,8 @@ export class SettingsView extends LitElement {
         whisperModels: { type: Array, state: true },
         sttLanguage: { type: String, state: true },
         askThinking: { type: Boolean, state: true },
+        // null = main list; 'aboutMe' / 'apiKeys' / 'shortcuts' = that sub-page.
+        activeSection: { type: String, state: true },
     };
     //////// after_modelStateService ////////
 
@@ -550,7 +574,6 @@ export class SettingsView extends LitElement {
         super();
         //////// after_modelStateService ////////
         this.shortcuts = {};
-        this.firebaseUser = null;
         this.apiKeys = { openai: '', gemini: '', anthropic: '', whisper: '' };
         this.providerConfig = {};
         this.isLoading = true;
@@ -562,9 +585,10 @@ export class SettingsView extends LitElement {
         this.selectedStt = null;
         this.isLlmListVisible = false;
         this.isSttListVisible = false;
-        this.presets = [];
-        this.selectedPreset = null;
-        this.showPresets = false;
+        this.aboutMe = '';
+        this.aboutMeDraft = '';
+        this.aboutMeSaving = false;
+        this.aboutMeStatus = '';
         // Ollama related
         this.ollamaStatus = { installed: false, running: false };
         this.ollamaModels = [];
@@ -573,46 +597,11 @@ export class SettingsView extends LitElement {
         this.whisperModels = [];
         this.sttLanguage = 'en';
         this.askThinking = false;
+        this.activeSection = null;
         this.whisperProgressTracker = null; // Will be initialized when needed
         this.handleUsePicklesKey = this.handleUsePicklesKey.bind(this)
-        this.autoUpdateEnabled = true;
-        this.autoUpdateLoading = true;
         this.loadInitialData();
         //////// after_modelStateService ////////
-    }
-
-    async loadAutoUpdateSetting() {
-        if (!window.api) return;
-        this.autoUpdateLoading = true;
-        try {
-            const enabled = await window.api.settingsView.getAutoUpdate();
-            this.autoUpdateEnabled = enabled;
-            console.log('Auto-update setting loaded:', enabled);
-        } catch (e) {
-            console.error('Error loading auto-update setting:', e);
-            this.autoUpdateEnabled = true; // fallback
-        }
-        this.autoUpdateLoading = false;
-        this.requestUpdate();
-    }
-
-    async handleToggleAutoUpdate() {
-        if (!window.api || this.autoUpdateLoading) return;
-        this.autoUpdateLoading = true;
-        this.requestUpdate();
-        try {
-            const newValue = !this.autoUpdateEnabled;
-            const result = await window.api.settingsView.setAutoUpdate(newValue);
-            if (result && result.success) {
-                this.autoUpdateEnabled = newValue;
-            } else {
-                console.error('Failed to update auto-update setting');
-            }
-        } catch (e) {
-            console.error('Error toggling auto-update:', e);
-        }
-        this.autoUpdateLoading = false;
-        this.requestUpdate();
     }
 
     async loadLocalAIStatus() {
@@ -653,20 +642,20 @@ export class SettingsView extends LitElement {
         this.isLoading = true;
         try {
             // Load essential data first
-            const [userState, modelSettings, presets, contentProtection, shortcuts, sttLanguage, askThinking] = await Promise.all([
-                window.api.settingsView.getCurrentUser(),
+            const [modelSettings, contentProtection, shortcuts, sttLanguage, askThinking, aboutMe] = await Promise.all([
                 window.api.settingsView.getModelSettings(), // Facade call
-                window.api.settingsView.getPresets(),
                 window.api.settingsView.getContentProtectionStatus(),
                 window.api.settingsView.getCurrentShortcuts(),
                 window.api.settingsView.getSttLanguage(),
-                window.api.settingsView.getAskThinking()
+                window.api.settingsView.getAskThinking(),
+                window.api.settingsView.getAboutMe()
             ]);
 
             if (sttLanguage) this.sttLanguage = sttLanguage;
             this.askThinking = askThinking === true;
-            
-            if (userState && userState.isLoggedIn) this.firebaseUser = userState;
+            this.aboutMe = aboutMe || '';
+            this.aboutMeDraft = this.aboutMe;
+            this.aboutMeStatus = '';
             
             if (modelSettings.success) {
                 const { config, storedKeys, availableLlm, availableStt, selectedModels } = modelSettings.data;
@@ -678,13 +667,8 @@ export class SettingsView extends LitElement {
                 this.selectedStt = selectedModels.stt;
             }
 
-            this.presets = presets || [];
             this.isContentProtectionOn = contentProtection;
             this.shortcuts = shortcuts || {};
-            if (this.presets.length > 0) {
-                const firstUserPreset = this.presets.find(p => p.is_default === 0);
-                if (firstUserPreset) this.selectedPreset = firstUserPreset;
-            }
             
             // Load LocalAI status asynchronously to improve initial load time
             this.loadLocalAIStatus();
@@ -697,13 +681,9 @@ export class SettingsView extends LitElement {
 
 
     async handleSaveKey(provider) {
-        const input = this.shadowRoot.querySelector(`#key-input-${provider}`);
-        if (!input) return;
-        const key = input.value;
-        
         // For Ollama, we need to ensure it's ready first
         if (provider === 'ollama') {
-        this.saving = true;
+            this.saving = true;
             
             // First ensure Ollama is installed and running
             const ensureResult = await window.api.settingsView.ensureOllamaReady();
@@ -740,7 +720,11 @@ export class SettingsView extends LitElement {
             return;
         }
         
-        // For other providers, use the normal flow
+        // For other providers, use the normal flow. Only these have a key
+        // input; Ollama and Whisper are local and handled above.
+        const input = this.shadowRoot.querySelector(`#key-input-${provider}`);
+        if (!input) return;
+        const key = input.value;
         this.saving = true;
         const result = await window.api.settingsView.validateKey({ provider, key });
         
@@ -983,18 +967,47 @@ export class SettingsView extends LitElement {
         return null;
     }
 
-
-    handleUsePicklesKey(e) {
-        e.preventDefault()
-        if (this.wasJustDragged) return
-    
-        console.log("Requesting Firebase authentication from main process...")
-        window.api.settingsView.startFirebaseAuth();
-    }
     //////// after_modelStateService ////////
 
     openShortcutEditor() {
         window.api.settingsView.openShortcutSettingsWindow();
+    }
+
+    openSection(section) {
+        this.activeSection = section;
+        this.scrollSettingsToTop();
+    }
+
+    closeSection() {
+        this.activeSection = null;
+        this.scrollSettingsToTop();
+    }
+
+    scrollSettingsToTop() {
+        this.updateComplete.then(() => {
+            const container = this.shadowRoot?.querySelector('.settings-container');
+            if (container) container.scrollTop = 0;
+        });
+    }
+
+    // How many key-based providers have a key, for the API Keys row.
+    getConfiguredKeyCount() {
+        return Object.keys(this.providerConfig)
+            .filter(id => id !== 'ollama' && id !== 'whisper')
+            .filter(id => !!this.apiKeys?.[id])
+            .length;
+    }
+
+    renderSubpage(title, content) {
+        return html`
+            <div class="settings-container subpage">
+                <div class="subpage-header">
+                    <button class="back-button" @click=${this.closeSection}>‹ Back</button>
+                    <h1 class="subpage-title">${title}</h1>
+                </div>
+                ${content}
+            </div>
+        `;
     }
 
     connectedCallback() {
@@ -1003,7 +1016,6 @@ export class SettingsView extends LitElement {
         this.setupEventListeners();
         this.setupIpcListeners();
         this.setupWindowResize();
-        this.loadAutoUpdateSetting();
         // Force one height calculation immediately (innerHeight may be 0 at first)
         setTimeout(() => this.updateScrollHeight(), 0);
     }
@@ -1036,64 +1048,26 @@ export class SettingsView extends LitElement {
     setupIpcListeners() {
         if (!window.api) return;
         
-        this._userStateListener = (event, userState) => {
-            console.log('[SettingsView] Received user-state-changed:', userState);
-            if (userState && userState.isLoggedIn) {
-                this.firebaseUser = userState;
-            } else {
-                this.firebaseUser = null;
-            }
-            this.loadAutoUpdateSetting();
-            // Reload model settings when user state changes (Firebase login/logout)
-            this.loadInitialData();
-        };
-        
         this._settingsUpdatedListener = (event, settings) => {
             console.log('[SettingsView] Received settings-updated');
             this.settings = settings;
             this.requestUpdate();
         };
 
-        // 프리셋 업데이트 리스너 추가
-        this._presetsUpdatedListener = async (event) => {
-            console.log('[SettingsView] Received presets-updated, refreshing presets');
-            try {
-                const presets = await window.api.settingsView.getPresets();
-                this.presets = presets || [];
-                
-                // 현재 선택된 프리셋이 삭제되었는지 확인 (사용자 프리셋만 고려)
-                const userPresets = this.presets.filter(p => p.is_default === 0);
-                if (this.selectedPreset && !userPresets.find(p => p.id === this.selectedPreset.id)) {
-                    this.selectedPreset = userPresets.length > 0 ? userPresets[0] : null;
-                }
-                
-                this.requestUpdate();
-            } catch (error) {
-                console.error('[SettingsView] Failed to refresh presets:', error);
-            }
-        };
         this._shortcutListener = (event, keybinds) => {
             console.log('[SettingsView] Received updated shortcuts:', keybinds);
             this.shortcuts = keybinds;
         };
         
-        window.api.settingsView.onUserStateChanged(this._userStateListener);
         window.api.settingsView.onSettingsUpdated(this._settingsUpdatedListener);
-        window.api.settingsView.onPresetsUpdated(this._presetsUpdatedListener);
         window.api.settingsView.onShortcutsUpdated(this._shortcutListener);
     }
 
     cleanupIpcListeners() {
         if (!window.api) return;
         
-        if (this._userStateListener) {
-            window.api.settingsView.removeOnUserStateChanged(this._userStateListener);
-        }
         if (this._settingsUpdatedListener) {
             window.api.settingsView.removeOnSettingsUpdated(this._settingsUpdatedListener);
-        }
-        if (this._presetsUpdatedListener) {
-            window.api.settingsView.removeOnPresetsUpdated(this._presetsUpdatedListener);
         }
         if (this._shortcutListener) {
             window.api.settingsView.removeOnShortcutsUpdated(this._shortcutListener);
@@ -1170,14 +1144,33 @@ export class SettingsView extends LitElement {
         return html`${keys.map(key => html`<span class="shortcut-key">${keyMap[key] || key}</span>`)}`;
     }
 
-    togglePresets() {
-        this.showPresets = !this.showPresets;
+    isAboutMeDirty() {
+        return this.aboutMeDraft.trim() !== this.aboutMe;
     }
 
-    async handlePresetSelect(preset) {
-        this.selectedPreset = preset;
-        // Here you could implement preset application logic
-        console.log('Selected preset:', preset);
+    handleAboutMeKeydown = (e) => {
+        // Cmd/Ctrl+Enter saves; plain Enter is a newline.
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+            e.preventDefault();
+            this.saveAboutMe();
+        }
+    }
+
+    saveAboutMe = async () => {
+        if (this.aboutMeSaving || !this.isAboutMeDirty()) return;
+        this.aboutMeSaving = true;
+        try {
+            const result = await window.api.settingsView.setAboutMe(this.aboutMeDraft);
+            if (!result?.success) throw new Error(result?.error || 'Unknown error');
+            this.aboutMe = result.aboutMe;
+            this.aboutMeDraft = result.aboutMe;
+            this.aboutMeStatus = 'Saved';
+        } catch (error) {
+            console.error('[SettingsView] Failed to save About Me:', error);
+            this.aboutMeStatus = `Not saved: ${error.message}`;
+        } finally {
+            this.aboutMeSaving = false;
+        }
     }
 
     handleMoveLeft() {
@@ -1188,15 +1181,6 @@ export class SettingsView extends LitElement {
     handleMoveRight() {
         console.log('Move Right clicked');
         window.api.settingsView.moveWindowStep('right');
-    }
-
-    async handlePersonalize() {
-        console.log('Personalize clicked');
-        try {
-            await window.api.settingsView.openPersonalizePage();
-        } catch (error) {
-            console.error('Failed to open personalize page:', error);
-        }
     }
 
     async handleToggleInvisibility() {
@@ -1227,11 +1211,6 @@ export class SettingsView extends LitElement {
     handleQuit() {
         console.log('Quit clicked');
         window.api.settingsView.quitApplication();
-    }
-
-    handleFirebaseLogout() {
-        console.log('Firebase Logout clicked');
-        window.api.settingsView.firebaseLogout();
     }
 
     async handleOllamaShutdown() {
@@ -1275,12 +1254,9 @@ export class SettingsView extends LitElement {
             `;
         }
 
-        const loggedIn = !!this.firebaseUser;
-
         const apiKeyManagementHTML = html`
             <div class="api-key-section">
                 ${Object.entries(this.providerConfig)
-                    .filter(([id, config]) => !id.includes('-glass'))
                     .map(([id, config]) => {
                         if (id === 'ollama') {
                             // Special UI for Ollama
@@ -1339,7 +1315,7 @@ export class SettingsView extends LitElement {
                         <div class="provider-key-group">
                             <label for="key-input-${id}">${config.name} API Key</label>
                             <input type="password" id="key-input-${id}"
-                                placeholder=${loggedIn ? "Using Pickle's Key" : `Enter ${config.name} API Key`} 
+                                placeholder=${`Enter ${config.name} API Key`} 
                                 .value=${this.apiKeys[id] || ''}
                             >
                             <div class="key-buttons">
@@ -1469,17 +1445,69 @@ export class SettingsView extends LitElement {
             </div>
         `;
 
+        if (this.activeSection === 'apiKeys') {
+            return this.renderSubpage('API Keys', apiKeyManagementHTML);
+        }
+
+        if (this.activeSection === 'aboutMe') {
+            const dirty = this.isAboutMeDirty();
+            return this.renderSubpage('About Me', html`
+                <div class="about-me-section">
+                    <p class="about-me-hint">
+                        Ask and the live summary read this to know who you are. Name, role, stack, the company, what your meetings are usually about.
+                    </p>
+                    <textarea
+                        class="about-me-input"
+                        .value=${this.aboutMeDraft}
+                        maxlength=${ABOUT_ME_MAX_LENGTH}
+                        placeholder="I'm Anna, a backend developer (Go, Postgres) at a fintech startup. In interviews, answer like a senior engineer."
+                        @input=${e => { this.aboutMeDraft = e.target.value; this.aboutMeStatus = ''; }}
+                        @keydown=${this.handleAboutMeKeydown}
+                        ?disabled=${this.aboutMeSaving}
+                    ></textarea>
+                    <div class="about-me-footer">
+                        <span class="about-me-status">
+                            ${this.aboutMeStatus || `${this.aboutMeDraft.length} / ${ABOUT_ME_MAX_LENGTH}`}
+                        </span>
+                        <button
+                            class="settings-button"
+                            @click=${this.saveAboutMe}
+                            ?disabled=${this.aboutMeSaving || !dirty}
+                        >
+                            ${this.aboutMeSaving ? 'Saving…' : dirty ? 'Save' : 'Saved'}
+                        </button>
+                    </div>
+                </div>
+            `);
+        }
+
+        if (this.activeSection === 'shortcuts') {
+            return this.renderSubpage('Shortcuts', html`
+                <div class="shortcuts-section">
+                    ${this.getMainShortcuts().map(shortcut => html`
+                        <div class="shortcut-item">
+                            <span class="shortcut-name">${shortcut.name}</span>
+                            <div class="shortcut-keys">
+                                ${this.renderShortcutKeys(shortcut.accelerator)}
+                            </div>
+                        </div>
+                    `)}
+                </div>
+                <div class="buttons-section">
+                    <button class="settings-button full-width" @click=${this.openShortcutEditor}>
+                        Edit Shortcuts
+                    </button>
+                </div>
+            `);
+        }
+
+        const keyCount = this.getConfiguredKeyCount();
+
         return html`
             <div class="settings-container">
                 <div class="header-section">
                     <div>
                         <h1 class="app-title">Pickle Glass</h1>
-                        <div class="account-info">
-                            ${this.firebaseUser
-                                ? html`Account: ${this.firebaseUser.email || 'Logged In'}`
-                                : `Account: Not Logged In`
-                            }
-                        </div>
                     </div>
                     <div class="invisibility-icon ${this.isContentProtectionOn ? 'visible' : ''}" title="Invisibility is On">
                         <svg width="14" height="14" viewBox="0 0 14 14" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -1489,13 +1517,6 @@ export class SettingsView extends LitElement {
                 </div>
 
                 <div class="buttons-section actions-section">
-                    <button class="settings-button full-width" @click=${this.handlePersonalize}>
-                        <span>Personalize / Meeting Notes</span>
-                    </button>
-                    <button class="settings-button full-width" @click=${this.handleToggleAutoUpdate} ?disabled=${this.autoUpdateLoading}>
-                        <span>Automatic Updates: ${this.autoUpdateEnabled ? 'On' : 'Off'}</span>
-                    </button>
-                    
                     <div class="move-buttons">
                         <button class="settings-button half-width" @click=${this.handleMoveLeft}>
                             <span>← Move</span>
@@ -1509,75 +1530,36 @@ export class SettingsView extends LitElement {
                         <span>${this.isContentProtectionOn ? 'Disable Invisibility' : 'Enable Invisibility'}</span>
                     </button>
                     
-                    <div class="bottom-buttons">
-                        ${this.firebaseUser
-                            ? html`
-                                <button class="settings-button half-width danger" @click=${this.handleFirebaseLogout}>
-                                    <span>Logout</span>
-                                </button>
-                                `
-                            : html`
-                                <button class="settings-button half-width" @click=${this.handleUsePicklesKey}>
-                                    <span>Login</span>
-                                </button>
-                                `
-                        }
-                        <button class="settings-button half-width danger" @click=${this.handleQuit}>
-                            <span>Quit</span>
-                        </button>
-                    </div>
-                </div>
-
-
-                <div class="buttons-section" style="border-top: 1px solid rgba(255, 255, 255, 0.1); padding-top: 6px; margin-top: 6px;">
-                    <button class="settings-button full-width" @click=${this.openShortcutEditor}>
-                        Edit Shortcuts
+                    <button class="settings-button full-width danger" @click=${this.handleQuit}>
+                        <span>Quit</span>
                     </button>
                 </div>
 
-                <div class="shortcuts-section">
-                    ${this.getMainShortcuts().map(shortcut => html`
-                        <div class="shortcut-item">
-                            <span class="shortcut-name">${shortcut.name}</span>
-                            <div class="shortcut-keys">
-                                ${this.renderShortcutKeys(shortcut.accelerator)}
-                            </div>
-                        </div>
-                    `)}
+
+                <div class="nav-section">
+                    <button class="nav-row" @click=${() => this.openSection('aboutMe')}>
+                        <span>About Me</span>
+                        <span class="nav-row-meta">
+                            ${this.isAboutMeDirty() ? 'unsaved' : this.aboutMe ? 'filled in' : 'empty'}
+                            <span class="nav-chevron">›</span>
+                        </span>
+                    </button>
+                    <button class="nav-row" @click=${() => this.openSection('apiKeys')}>
+                        <span>API Keys</span>
+                        <span class="nav-row-meta">
+                            ${keyCount > 0 ? `${keyCount} set` : 'none set'}
+                            <span class="nav-chevron">›</span>
+                        </span>
+                    </button>
+                    <button class="nav-row" @click=${() => this.openSection('shortcuts')}>
+                        <span>Shortcuts</span>
+                        <span class="nav-row-meta">
+                            <span class="nav-chevron">›</span>
+                        </span>
+                    </button>
                 </div>
 
                 ${modelSelectionHTML}
-
-                <div class="preset-section">
-                    <div class="preset-header">
-                        <span class="preset-title">
-                            My Presets
-                            <span class="preset-count">(${this.presets.filter(p => p.is_default === 0).length})</span>
-                        </span>
-                        <span class="preset-toggle" @click=${this.togglePresets}>
-                            ${this.showPresets ? '▼' : '▶'}
-                        </span>
-                    </div>
-                    
-                    <div class="preset-list ${this.showPresets ? '' : 'hidden'}">
-                        ${this.presets.filter(p => p.is_default === 0).length === 0 ? html`
-                            <div class="no-presets-message">
-                                No custom presets yet.<br>
-                                <span class="web-link" @click=${this.handlePersonalize}>
-                                    Create your first preset
-                                </span>
-                            </div>
-                        ` : this.presets.filter(p => p.is_default === 0).map(preset => html`
-                            <div class="preset-item ${this.selectedPreset?.id === preset.id ? 'selected' : ''}"
-                                 @click=${() => this.handlePresetSelect(preset)}>
-                                <span class="preset-name">${preset.title}</span>
-                                ${this.selectedPreset?.id === preset.id ? html`<span class="preset-status">Selected</span>` : ''}
-                            </div>
-                        `)}
-                    </div>
-                </div>
-
-                ${apiKeyManagementHTML}
             </div>
         `;
     }

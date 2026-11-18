@@ -1,22 +1,8 @@
 'use client'
 
 import { Download, Smartphone, Monitor, Tablet } from 'lucide-react'
-import { useRedirectIfNotAuth } from '@/utils/auth'
 
 export default function DownloadPage() {
-  const userInfo = useRedirectIfNotAuth()
-
-  if (!userInfo) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
   return (
     <div className="p-8">
       <div className="max-w-4xl mx-auto text-center">

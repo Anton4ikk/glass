@@ -1,11 +1,9 @@
 'use client'
 
 import { useState, useEffect, Suspense } from 'react'
-import { useRedirectIfNotAuth } from '@/utils/auth'
 import { useSearchParams, useRouter } from 'next/navigation'
 import Link from 'next/link'
 import {
-  UserProfile,
   SessionDetails,
   Transcript,
   AiMessage,
@@ -25,7 +23,6 @@ const Section = ({ title, children }: { title: string, children: React.ReactNode
 );
 
 function SessionDetailsContent() {
-  const userInfo = useRedirectIfNotAuth() as UserProfile | null;
   const [sessionDetails, setSessionDetails] = useState<SessionDetails | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const searchParams = useSearchParams();
@@ -34,7 +31,7 @@ function SessionDetailsContent() {
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    if (userInfo && sessionId) {
+    if (sessionId) {
       const fetchDetails = async () => {
         setIsLoading(true);
         try {
@@ -48,7 +45,7 @@ function SessionDetailsContent() {
       };
       fetchDetails();
     }
-  }, [userInfo, sessionId]);
+  }, [sessionId]);
 
   const handleDelete = async () => {
     if (!sessionId) return;
@@ -64,7 +61,7 @@ function SessionDetailsContent() {
     }
   };
 
-  if (!userInfo || isLoading) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-[#FDFCF9] flex items-center justify-center">
         <div className="text-center">

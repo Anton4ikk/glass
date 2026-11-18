@@ -1,12 +1,11 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import Image from 'next/image';
 import { useState, createElement, useEffect, useMemo, useCallback, memo } from 'react';
-import { Search, Activity, HelpCircle, Download, ChevronDown, User, Shield, Database, CreditCard, LogOut, LucideIcon } from 'lucide-react';
-import { logout, UserProfile, checkApiKeyStatus } from '@/utils/api';
-import { useAuth } from '@/utils/auth';
+import { ChevronDown, KeyRound, LucideIcon } from 'lucide-react';
+import { checkApiKeyStatus } from '@/utils/api';
 
 const ANIMATION_DURATION = {
     SIDEBAR: 500,
@@ -21,7 +20,6 @@ const DIMENSIONS = {
     SIDEBAR_EXPANDED: 220,
     SIDEBAR_COLLAPSED: 64,
     ICON_SIZE: 18,
-    USER_AVATAR_SIZE: 32,
     HEADER_HEIGHT: 64,
 } as const;
 
@@ -147,9 +145,7 @@ IconComponent.displayName = 'IconComponent';
 
 const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps) => {
     const pathname = usePathname();
-    const router = useRouter();
     const [isSettingsExpanded, setIsSettingsExpanded] = useState(pathname.startsWith('/settings'));
-    const { user: userInfo, isLoading: authLoading } = useAuth();
     const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
 
     const { isAnimating, getTextAnimationStyle, getSubmenuAnimationStyle, sidebarContainerStyle, getTextContainerStyle, getUniformTextStyle } =
@@ -187,13 +183,6 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
                 ariaLabel: 'View my activity',
             },
             {
-                name: 'Personalize',
-                href: '/personalize',
-                icon: '/book.svg',
-                isLucide: false,
-                ariaLabel: 'Personalization settings',
-            },
-            {
                 name: 'Settings',
                 href: '/settings',
                 icon: '/setting.svg',
@@ -207,9 +196,8 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
 
     const settingsSubmenu = useMemo<SubmenuItem[]>(
         () => [
-            { name: 'Personal Profile', href: '/settings', icon: '/user.svg', isLucide: false, ariaLabel: 'Personal profile settings' },
+            { name: 'API Key', href: '/settings', icon: KeyRound, isLucide: true, ariaLabel: 'API key settings' },
             { name: 'Data & privacy', href: '/settings/privacy', icon: '/privacy.svg', isLucide: false, ariaLabel: 'Data and privacy settings' },
-            { name: 'Billing', href: '/settings/billing', icon: '/credit-card.svg', isLucide: false, ariaLabel: 'Billing settings' },
         ],
         []
     );
@@ -247,14 +235,6 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
             setIsSettingsExpanded(prev => !prev);
         }
     }, [pathname]);
-
-    const handleLogout = useCallback(async () => {
-        try {
-            await logout();
-        } catch (error) {
-            console.error('An error occurred during logout:', error);
-        }
-    }, []);
 
     const handleKeyDown = useCallback((event: React.KeyboardEvent, action?: () => void) => {
         if (event.key === 'Enter' || event.key === ' ') {
@@ -374,42 +354,6 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
                                         </Link>
                                     </li>
                                 ))}
-                                <li role="none">
-                                    {isFirebaseUser ? (
-                                        <button
-                                            onClick={handleLogout}
-                                            onKeyDown={e => handleKeyDown(e, handleLogout)}
-                                            className={`
-                                    group flex items-center rounded-lg px-[12px] py-[8px] text-[13px] gap-x-[9px]
-                                    text-red-600 hover:text-red-700 hover:bg-[#f7f7f7] w-full 
-                                    transition-colors duration-${ANIMATION_DURATION.COLOR_TRANSITION} ease-out
-                                    focus:outline-none
-                                  `}
-                                            style={{ willChange: 'background-color, color' }}
-                                            role="menuitem"
-                                            aria-label="Logout"
-                                        >
-                                            <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />
-                                            <span className="whitespace-nowrap">Logout</span>
-                                        </button>
-                                    ) : (
-                                        <Link
-                                            href="/login"
-                                            className={`
-                                    group flex items-center rounded-lg px-[12px] py-[8px] text-[13px] gap-x-[9px] 
-                                    text-[#282828] hover:text-[#282828] hover:bg-[#f7f7f7] w-full 
-                                    transition-colors duration-${ANIMATION_DURATION.COLOR_TRANSITION} ease-out
-                                    focus:outline-none
-                                  `}
-                                            style={{ willChange: 'background-color, color' }}
-                                            role="menuitem"
-                                            aria-label="Login"
-                                        >
-                                            <LogOut className="h-3.5 w-3.5 shrink-0 transform -scale-x-100" aria-hidden="true" />
-                                            <span className="whitespace-nowrap">Login</span>
-                                        </Link>
-                                    )}
-                                </li>
                             </ul>
                         </div>
                     </li>
@@ -449,7 +393,6 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
             isCollapsed,
             isSettingsExpanded,
             toggleSettings,
-            handleLogout,
             handleKeyDown,
             getUniformTextStyle,
             getTextContainerStyle,
@@ -457,18 +400,6 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
             settingsSubmenu,
         ]
     );
-
-    const getUserDisplayName = useCallback(() => {
-        if (authLoading) return 'Loading...';
-        return userInfo?.display_name || 'Guest';
-    }, [userInfo, authLoading]);
-
-    const getUserInitial = useCallback(() => {
-        if (authLoading) return 'L';
-        return userInfo?.display_name ? userInfo.display_name.charAt(0).toUpperCase() : 'G';
-    }, [userInfo, authLoading]);
-
-    const isFirebaseUser = userInfo && userInfo.uid !== 'default_user';
 
     return (
         <aside
@@ -542,8 +473,8 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
 
                 {!isCollapsed && hasApiKey !== null && (
                     <div className="px-2.5 py-2 text-center">
-                        <span className={`text-xs px-2 py-1 rounded-full ${hasApiKey ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'}`}>
-                            {hasApiKey ? 'Local running' : 'Pickle Free System'}
+                        <span className={`text-xs px-2 py-1 rounded-full ${hasApiKey ? 'bg-blue-100 text-blue-800' : 'bg-gray-100 text-gray-700'}`}>
+                            {hasApiKey ? 'API key set' : 'No API key'}
                         </span>
                     </div>
                 )}
@@ -580,51 +511,6 @@ const SidebarComponent = ({ isCollapsed, onToggle, onSearchClick }: SidebarProps
                             </div>
                         </Link>
                     ))}
-                </div>
-
-                <div className="mt-[0px] flex items-center w-full h-[1px] px-[4px] mt-[8px] mb-[8px]">
-                    <div className="w-full h-[1px] bg-[#d9d9d9]"></div>
-                </div>
-
-                <div
-                    className={`mt-[0px] flex items-center ${isCollapsed ? '' : 'gap-x-[10px]'}`}
-                    style={{
-                        padding: isCollapsed ? '6px 8px' : '6px 8px',
-                        justifyContent: isCollapsed ? 'flex-start' : 'flex-start',
-                        transition: `all ${ANIMATION_DURATION.SIDEBAR}ms cubic-bezier(0.4, 0, 0.2, 1)`,
-                    }}
-                    role="region"
-                    aria-label="User profile"
-                >
-                    <div
-                        className={`
-              h-[30px] w-[30px] rounded-full border border-[#8d8d8d] flex items-center justify-center text-[#282828] text-[13px] 
-              shrink-0 cursor-pointer transition-all duration-${ANIMATION_DURATION.ICON_HOVER} 
-              hover:bg-[#f7f7f7] focus:outline-none
-            `}
-                        title={getUserDisplayName()}
-                        style={{ willChange: 'background-color, transform' }}
-                        tabIndex={0}
-                        role="button"
-                        aria-label={`User: ${getUserDisplayName()}`}
-                        onKeyDown={e =>
-                            handleKeyDown(e, () => {
-                                if (isFirebaseUser) {
-                                    router.push('/settings');
-                                } else {
-                                    router.push('/login');
-                                }
-                            })
-                        }
-                    >
-                        {getUserInitial()}
-                    </div>
-
-                    <div className="ml-[0px] overflow-hidden" style={getTextContainerStyle()}>
-                        <span className="block text-[13px] leading-6 text-[#282828]" style={getUniformTextStyle()}>
-                            {getUserDisplayName()}
-                        </span>
-                    </div>
                 </div>
             </nav>
         </aside>

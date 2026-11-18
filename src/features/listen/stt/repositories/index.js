@@ -1,23 +1,10 @@
 const sqliteRepository = require('./sqlite.repository');
-const firebaseRepository = require('./firebase.repository');
-const authService = require('../../../common/services/authService');
-
-function getBaseRepository() {
-    const user = authService.getCurrentUser();
-    if (user && user.isLoggedIn) {
-        return firebaseRepository;
-    }
-    return sqliteRepository;
-}
+const { LOCAL_UID } = require('../../../common/config/localUser');
 
 const sttRepositoryAdapter = {
-    addTranscript: ({ sessionId, speaker, text }) => {
-        const uid = authService.getCurrentUserId();
-        return getBaseRepository().addTranscript({ uid, sessionId, speaker, text });
-    },
-    getAllTranscriptsBySessionId: (sessionId) => {
-        return getBaseRepository().getAllTranscriptsBySessionId(sessionId);
-    }
+    addTranscript: ({ sessionId, speaker, text }) =>
+        sqliteRepository.addTranscript({ uid: LOCAL_UID, sessionId, speaker, text }),
+    getAllTranscriptsBySessionId: (sessionId) => sqliteRepository.getAllTranscriptsBySessionId(sessionId),
 };
 
-module.exports = sttRepositoryAdapter; 
+module.exports = sttRepositoryAdapter;

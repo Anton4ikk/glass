@@ -1,6 +1,5 @@
 const SttService = require('./stt/sttService');
 const SummaryService = require('./summary/summaryService');
-const authService = require('../common/services/authService');
 const sessionRepository = require('../common/repositories/session');
 const sttRepository = require('./stt/repositories');
 const internalBridge = require('../../bridge/internalBridge');
@@ -97,10 +96,6 @@ class ListenService {
 
     async initializeNewSession() {
         try {
-            // The repository adapter injects the UID; it only has to exist.
-            if (!authService.getCurrentUser()) {
-                throw new Error('Cannot initialize session: auth service not ready.');
-            }
             this.currentSessionId = await sessionRepository.getOrCreateActive('listen');
             this.summaryService.setSessionId(this.currentSessionId);
             this.summaryService.resetConversationHistory();

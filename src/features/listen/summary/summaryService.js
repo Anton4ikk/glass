@@ -3,11 +3,13 @@ const sessionRepository = require('../../common/repositories/session');
 const summaryRepository = require('./repositories');
 const modelStateService = require('../../common/services/modelStateService');
 const { isTextOnly, markTextOnly } = require('../../common/ai/textOnlyModels');
+const { aboutMePromptSection } = require('../../common/prompts/aboutMe');
 
 // Analysis gets its own prompt: the shared 'pickle_glass_analysis' profile is
 // written for Ask (it promises a screenshot and forbids summaries), which
 // contradicted the summary format requested below.
 const ANALYSIS_SYSTEM_PROMPT = `You are the user's live meeting and interview co-pilot. You receive a speech-to-text transcript of an ongoing conversation and, when available, a screenshot of the user's screen. Lines starting with "me:" are the user, lines starting with "them:" are the other participants.
+{{ABOUT_ME}}
 
 The transcript is machine-generated and may contain recognition errors: infer the intended meaning and ignore fragments that are clearly noise.
 
@@ -47,6 +49,10 @@ const DEFAULT_LANGUAGE_RULE = 'Write all content in the language of the conversa
 // New turns arriving within this window are analyzed together (the "me" and
 // "them" streams often flush a turn each at the same moment).
 const ANALYSIS_DEBOUNCE_MS = 1500;
+// Each analysis sends a screenshot to the LLM; on a local model that competes
+// with whisper and the video call for the machine, so runs are spaced out.
+// The first turn of a session is still analyzed right away.
+const ANALYSIS_MIN_INTERVAL_MS = 12000;
 const MAX_PROMPT_TURNS = 30;
 // Extraction, not creative writing: a low temperature keeps the open
 // questions worded the same between runs, so fewer look new to the auto answer.
@@ -155,6 +161,7 @@ class SummaryService {
         this.analysisTimer = null;
         this.analysisRunning = false;
         this.analysisPending = false;
+        this.lastAnalysisStartedAt = -Infinity;
 
         // Questions already answered automatically in this session.
         this.autoAnsweredQuestions = [];
@@ -196,6 +203,7 @@ class SummaryService {
         this.analysisPending = false;
         this.autoAnsweredQuestions = [];
         this.autoAnsweredScreenTasks = [];
+        this.lastAnalysisStartedAt = -Infinity;
     }
 
     formatConversationForPrompt(conversationTexts, maxTurns = MAX_PROMPT_TURNS) {
@@ -206,17 +214,18 @@ class SummaryService {
      * Asks the LLM for an analysis. Throws on failure so the caller can show it.
      * @returns {Promise<{structuredData: object, responseText: string, model: string}>}
      */
-    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { screenshotBase64 = null, language = null } = {}) {
+    async makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { screenshotBase64 = null, language = null, aboutMe = '' } = {}) {
         const modelInfo = await modelStateService.getCurrentModelInfo('llm');
         if (!modelInfo || !modelInfo.apiKey) {
             throw new Error('AI model or API key is not configured.');
         }
         if (sessionId) await sessionRepository.touch(sessionId);
 
-        const systemPrompt = ANALYSIS_SYSTEM_PROMPT.replace('{{LANGUAGE_RULE}}', LANGUAGE_RULES[language] || DEFAULT_LANGUAGE_RULE).replace(
-            '{{CONVERSATION_HISTORY}}',
-            this.formatConversationForPrompt(conversationTexts)
-        );
+        const profileSection = aboutMePromptSection(aboutMe);
+        // Function replacers: the user's text and the transcript may contain "$&" etc.
+        const systemPrompt = ANALYSIS_SYSTEM_PROMPT.replace('{{ABOUT_ME}}', () => (profileSection ? `\n${profileSection}\n` : ''))
+            .replace('{{LANGUAGE_RULE}}', LANGUAGE_RULES[language] || DEFAULT_LANGUAGE_RULE)
+            .replace('{{CONVERSATION_HISTORY}}', () => this.formatConversationForPrompt(conversationTexts));
 
         const previousContext = previousResult
             ? `Previous Analysis Context:
@@ -263,8 +272,6 @@ Keep all points concise and build upon previous analysis if provided.${languageR
             // would eat the 1024-token budget and leave an empty summary, and a
             // slow background summary also holds up Ask in the Ollama queue.
             think: false,
-            usePortkey: modelInfo.provider === 'openai-glass',
-            portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
         });
 
         let completion;
@@ -369,15 +376,18 @@ Keep all points concise and build upon previous analysis if provided.${languageR
     }
 
     /**
-     * Runs an analysis shortly after every new turn, so answers show up while
-     * the conversation is still going.
+     * Runs an analysis shortly after a new turn, so answers show up while the
+     * conversation is still going, but no sooner than ANALYSIS_MIN_INTERVAL_MS
+     * after the previous one started. Turns in between are covered together.
      */
     scheduleAnalysis() {
         this.cancelScheduledAnalysis();
+        const sinceLast = Date.now() - this.lastAnalysisStartedAt;
+        const delay = Math.max(ANALYSIS_DEBOUNCE_MS, ANALYSIS_MIN_INTERVAL_MS - sinceLast);
         this.analysisTimer = setTimeout(() => {
             this.analysisTimer = null;
             this.runLiveAnalysis();
-        }, ANALYSIS_DEBOUNCE_MS);
+        }, delay);
     }
 
     cancelScheduledAnalysis() {
@@ -393,6 +403,7 @@ Keep all points concise and build upon previous analysis if provided.${languageR
             return;
         }
         this.analysisRunning = true;
+        this.lastAnalysisStartedAt = Date.now();
         try {
             await this.runAnalysis();
         } finally {
@@ -401,7 +412,7 @@ Keep all points concise and build upon previous analysis if provided.${languageR
         if (this.analysisPending) {
             this.analysisPending = false;
             if (this.conversationHistory.length > this.lastAnalyzedCount) {
-                this.runLiveAnalysis();
+                this.scheduleAnalysis();
             }
         }
     }
@@ -433,8 +444,8 @@ Keep all points concise and build upon previous analysis if provided.${languageR
         let result;
         let error;
         try {
-            const [screenshotBase64, language] = await Promise.all([this.captureScreen(), this.getAnswerLanguage()]);
-            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { screenshotBase64, language });
+            const [screenshotBase64, language, aboutMe] = await Promise.all([this.captureScreen(), this.getAnswerLanguage(), this.getAboutMe()]);
+            result = await this.makeOutlineAndRequests(conversationTexts, sessionId, previousResult, { screenshotBase64, language, aboutMe });
         } catch (err) {
             error = err;
         }
@@ -533,6 +544,15 @@ Keep all points concise and build upon previous analysis if provided.${languageR
             return await require('../../settings/settingsService').getSttLanguageSetting();
         } catch {
             return null;
+        }
+    }
+
+    /** What the user wrote about themselves in Settings, so the analysis knows who "me" is. */
+    async getAboutMe() {
+        try {
+            return await require('../../settings/settingsService').getAboutMeSetting();
+        } catch {
+            return '';
         }
     }
 }

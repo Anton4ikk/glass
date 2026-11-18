@@ -1,14 +1,9 @@
 const sqliteClient = require('../../services/sqliteClient');
-const encryptionService = require('../../services/encryptionService');
 
 function getByProvider(provider) {
     const db = sqliteClient.getDb();
     const stmt = db.prepare('SELECT * FROM provider_settings WHERE provider = ?');
     const result = stmt.get(provider) || null;
-    
-    if (result && result.api_key && encryptionService.looksEncrypted(result.api_key)) {
-        result.api_key = encryptionService.decrypt(result.api_key);
-    }
     
     return result;
 }
@@ -18,12 +13,7 @@ function getAll() {
     const stmt = db.prepare('SELECT * FROM provider_settings ORDER BY provider');
     const results = stmt.all();
     
-    return results.map(result => {
-        if (result.api_key && encryptionService.looksEncrypted(result.api_key)) {
-            result.api_key = encryptionService.decrypt(result.api_key);
-        }
-        return result;
-    });
+    return results;
 }
 
 function upsert(provider, settings) {
@@ -75,22 +65,12 @@ function removeAll() {
     return { changes: result.changes };
 }
 
-function getRawApiKeys() {
-    const db = sqliteClient.getDb();
-    const stmt = db.prepare('SELECT api_key FROM provider_settings');
-    return stmt.all();
-}
-
 // Get active provider for a specific type (llm or stt)
 function getActiveProvider(type) {
     const db = sqliteClient.getDb();
     const column = type === 'llm' ? 'is_active_llm' : 'is_active_stt';
     const stmt = db.prepare(`SELECT * FROM provider_settings WHERE ${column} = 1`);
     const result = stmt.get() || null;
-    
-    if (result && result.api_key && encryptionService.looksEncrypted(result.api_key)) {
-        result.api_key = encryptionService.decrypt(result.api_key);
-    }
     
     return result;
 }
@@ -126,16 +106,13 @@ function getActiveSettings() {
     `);
     const results = stmt.all();
     
-    // Decrypt API keys and organize by type
+    // Organize by type
     const activeSettings = {
         llm: null,
         stt: null
     };
     
     results.forEach(result => {
-        if (result.api_key && encryptionService.looksEncrypted(result.api_key)) {
-            result.api_key = encryptionService.decrypt(result.api_key);
-        }
         if (result.is_active_llm) {
             activeSettings.llm = result;
         }
@@ -153,7 +130,6 @@ module.exports = {
     upsert,
     remove,
     removeAll,
-    getRawApiKeys,
     getActiveProvider,
     setActiveProvider,
     getActiveSettings

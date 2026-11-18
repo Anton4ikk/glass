@@ -12,18 +12,9 @@ contextBridge.exposeInMainWorld('api', {
   
   // Common utilities used across multiple components
   common: {
-    // User & Auth
-    getCurrentUser: () => ipcRenderer.invoke('get-current-user'),
-    startFirebaseAuth: () => ipcRenderer.invoke('start-firebase-auth'),
-    firebaseLogout: () => ipcRenderer.invoke('firebase-logout'),
-    
     // App Control
-      quitApplication: () => ipcRenderer.invoke('quit-application'),
-      openExternal: (url) => ipcRenderer.invoke('open-external', url),
-
-    // User state listener (used by multiple components)
-      onUserStateChanged: (callback) => ipcRenderer.on('user-state-changed', callback),
-      removeOnUserStateChanged: (callback) => ipcRenderer.removeListener('user-state-changed', callback),
+    quitApplication: () => ipcRenderer.invoke('quit-application'),
+    openExternal: (url) => ipcRenderer.invoke('open-external', url),
   },
 
   // UI Component specific namespaces
@@ -94,10 +85,6 @@ contextBridge.exposeInMainWorld('api', {
     checkPermissionsCompleted: () => ipcRenderer.invoke('check-permissions-completed'),
     
     // Listeners
-    onUserStateChanged: (callback) => ipcRenderer.on('user-state-changed', callback),
-    removeOnUserStateChanged: (callback) => ipcRenderer.removeListener('user-state-changed', callback),
-    onAuthFailed: (callback) => ipcRenderer.on('auth-failed', callback),
-    removeOnAuthFailed: (callback) => ipcRenderer.removeListener('auth-failed', callback),
     onForceShowApiKeyHeader: (callback) => ipcRenderer.on('force-show-apikey-header', callback),
     removeOnForceShowApiKeyHeader: (callback) => ipcRenderer.removeListener('force-show-apikey-header', callback),
   },
@@ -133,9 +120,6 @@ contextBridge.exposeInMainWorld('api', {
     checkSystemPermissions: () => ipcRenderer.invoke('check-system-permissions'),
     requestMicrophonePermission: () => ipcRenderer.invoke('request-microphone-permission'),
     openSystemPreferences: (preference) => ipcRenderer.invoke('open-system-preferences', preference),
-    markKeychainCompleted: () => ipcRenderer.invoke('mark-keychain-completed'),
-    checkKeychainCompleted: (uid) => ipcRenderer.invoke('check-keychain-completed', uid),
-    initializeEncryptionKey: () => ipcRenderer.invoke('initialize-encryption-key') // New for keychain
   },
 
   // src/ui/app/PickleGlassApp.js
@@ -202,12 +186,6 @@ contextBridge.exposeInMainWorld('api', {
 
   // src/ui/settings/SettingsView.js
   settingsView: {
-    // User & Auth
-    getCurrentUser: () => ipcRenderer.invoke('get-current-user'),
-    openPersonalizePage: () => ipcRenderer.invoke('open-personalize-page'),
-    firebaseLogout: () => ipcRenderer.invoke('firebase-logout'),
-    startFirebaseAuth: () => ipcRenderer.invoke('start-firebase-auth'),
-
     // Model & Provider Management
     getModelSettings: () => ipcRenderer.invoke('settings:get-model-settings'), // Facade call
     getProviderConfig: () => ipcRenderer.invoke('model:get-provider-config'),
@@ -218,6 +196,8 @@ contextBridge.exposeInMainWorld('api', {
     setSttLanguage: (language) => ipcRenderer.invoke('settings:set-stt-language', language),
     getAskThinking: () => ipcRenderer.invoke('settings:get-ask-thinking'),
     setAskThinking: (enabled) => ipcRenderer.invoke('settings:set-ask-thinking', enabled),
+    getAboutMe: () => ipcRenderer.invoke('settings:get-about-me'),
+    setAboutMe: (text) => ipcRenderer.invoke('settings:set-about-me', text),
     validateKey: (data) => ipcRenderer.invoke('model:validate-key', data),
     saveApiKey: (key) => ipcRenderer.invoke('model:save-api-key', key),
     removeApiKey: (provider) => ipcRenderer.invoke('model:remove-api-key', provider),
@@ -234,8 +214,6 @@ contextBridge.exposeInMainWorld('api', {
     
     // Settings Management
     getPresets: () => ipcRenderer.invoke('settings:getPresets'),
-    getAutoUpdate: () => ipcRenderer.invoke('settings:get-auto-update'),
-    setAutoUpdate: (isEnabled) => ipcRenderer.invoke('settings:set-auto-update', isEnabled),
     getContentProtectionStatus: () => ipcRenderer.invoke('get-content-protection-status'),
     toggleContentProtection: () => ipcRenderer.invoke('toggle-content-protection'),
     getCurrentShortcuts: () => ipcRenderer.invoke('settings:getCurrentShortcuts'),
@@ -253,8 +231,6 @@ contextBridge.exposeInMainWorld('api', {
     pullOllamaModel: (modelName) => ipcRenderer.invoke('ollama:pull-model', modelName),
     
     // Listeners
-    onUserStateChanged: (callback) => ipcRenderer.on('user-state-changed', callback),
-    removeOnUserStateChanged: (callback) => ipcRenderer.removeListener('user-state-changed', callback),
     onSettingsUpdated: (callback) => ipcRenderer.on('settings-updated', callback),
     removeOnSettingsUpdated: (callback) => ipcRenderer.removeListener('settings-updated', callback),
     onPresetsUpdated: (callback) => ipcRenderer.on('presets-updated', callback),

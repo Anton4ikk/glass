@@ -1,4 +1,5 @@
 const sqliteClient = require('../../common/services/sqliteClient');
+const { normalizeAboutMe } = require('../../common/prompts/aboutMe');
 
 function getPresets(uid) {
     const db = sqliteClient.getDb();
@@ -90,51 +91,6 @@ function deletePreset(id, uid) {
     }
 }
 
-function getAutoUpdate(uid) {
-    const db = sqliteClient.getDb();
-    const targetUid = uid;
-
-    try {
-        const row = db.prepare('SELECT auto_update_enabled FROM users WHERE uid = ?').get(targetUid);
-        
-        if (row) {
-            console.log('SQLite: Auto update setting found:', row.auto_update_enabled);
-            return row.auto_update_enabled !== 0;
-        } else {
-            // User doesn't exist, create them with default settings
-            const now = Math.floor(Date.now() / 1000);
-            const stmt = db.prepare(
-                'INSERT OR REPLACE INTO users (uid, display_name, email, created_at, auto_update_enabled) VALUES (?, ?, ?, ?, ?)');
-            stmt.run(targetUid, 'User', 'user@example.com', now, 1);
-            return true; // default to enabled
-        }
-    } catch (error) {
-        console.error('SQLite: Error getting auto_update_enabled setting:', error);
-        return true; // fallback to enabled
-    }
-}
-
-function setAutoUpdate(uid, isEnabled) {
-    const db = sqliteClient.getDb();
-    const targetUid = uid || sqliteClient.defaultUserId;
-    
-    try {
-        const result = db.prepare('UPDATE users SET auto_update_enabled = ? WHERE uid = ?').run(isEnabled ? 1 : 0, targetUid);
-        
-        // If no rows were updated, the user might not exist, so create them
-        if (result.changes === 0) {
-            const now = Math.floor(Date.now() / 1000);
-            const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, auto_update_enabled) VALUES (?, ?, ?, ?, ?)');
-            stmt.run(targetUid, 'User', 'user@example.com', now, isEnabled ? 1 : 0);
-        }
-        
-        return { success: true };
-    } catch (error) {
-        console.error('SQLite: Error setting auto-update:', error);
-        throw error;
-    }
-}
-
 // Language forced on the STT engine. Whisper's 'auto' detection is unreliable
 // on the short chunks Glass feeds it and drifts to English mid-conversation,
 // so the language is an explicit user choice rather than a guess.
@@ -217,18 +173,53 @@ function setAskThinking(uid, enabled) {
     }
 }
 
+function getAboutMe(uid) {
+    const db = sqliteClient.getDb();
+    const targetUid = uid || sqliteClient.defaultUserId;
+
+    try {
+        const row = db.prepare('SELECT about_me FROM users WHERE uid = ?').get(targetUid);
+        return normalizeAboutMe(row?.about_me);
+    } catch (error) {
+        console.error('SQLite: Error getting about_me:', error);
+        return '';
+    }
+}
+
+function setAboutMe(uid, text) {
+    const db = sqliteClient.getDb();
+    const targetUid = uid || sqliteClient.defaultUserId;
+    const value = normalizeAboutMe(text);
+
+    try {
+        const result = db.prepare('UPDATE users SET about_me = ? WHERE uid = ?').run(value, targetUid);
+
+        // If no rows were updated, the user might not exist, so create them
+        if (result.changes === 0) {
+            const now = Math.floor(Date.now() / 1000);
+            const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, about_me) VALUES (?, ?, ?, ?, ?)');
+            stmt.run(targetUid, 'User', 'user@example.com', now, value);
+        }
+
+        return { success: true, aboutMe: value };
+    } catch (error) {
+        console.error('SQLite: Error setting about_me:', error);
+        throw error;
+    }
+}
+
 module.exports = {
     getPresets,
     getPresetTemplates,
     createPreset,
     updatePreset,
     deletePreset,
-    getAutoUpdate,
-    setAutoUpdate,
     getSttLanguage,
     setSttLanguage,
     getAskThinking,
     setAskThinking,
+    getAboutMe,
+    setAboutMe,
     SUPPORTED_STT_LANGUAGES,
     DEFAULT_STT_LANGUAGE
 };

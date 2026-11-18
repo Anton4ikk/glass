@@ -3,6 +3,7 @@ const internalBridge = require('../../bridge/internalBridge');
 const sessionRepository = require('../common/repositories/session');
 const askRepository = require('./repositories');
 const { getSystemPrompt } = require('../common/prompts/promptBuilder');
+const { aboutMePromptSection } = require('../common/prompts/aboutMe');
 const modelStateService = require('../common/services/modelStateService');
 const { captureScreenshot } = require('../common/utils/screenCapture');
 const { isTextOnly, markTextOnly } = require('../common/ai/textOnlyModels');
@@ -197,16 +198,19 @@ class AskService {
             // Independent lookups run together: the screenshot alone takes a
             // few hundred ms, all of it before the first token.
             const settingsService = getSettingsService();
-            const [sessionId, screenshotBase64, language, think] = await Promise.all([
+            const [sessionId, screenshotBase64, language, think, aboutMe] = await Promise.all([
                 sessionRepository.getOrCreateActive('ask'),
                 isTextOnly(modelInfo.model) ? null : captureScreenshot().then(r => (r.success ? r.base64 : null)),
                 settingsService.getSttLanguageSetting(),
                 settingsService.getAskThinkingSetting(),
+                settingsService.getAboutMeSetting(),
             ]);
             await askRepository.addAiMessage({ sessionId, role: 'user', content: prompt });
 
+            const profileSection = aboutMePromptSection(aboutMe);
             const systemPrompt =
                 getSystemPrompt('pickle_glass_analysis', this._formatConversationForPrompt(conversationHistoryRaw), false) +
+                (profileSection ? `\n\n${profileSection}` : '') +
                 (ANSWER_LANGUAGE_RULES[language] ? `\n\n${ANSWER_LANGUAGE_RULES[language]}` : '');
             const requestText = `User Request: ${prompt}`;
             const textMessages = [
@@ -231,8 +235,6 @@ class AskService {
                 // Reasoning tokens count against this limit: leave room for the answer.
                 maxTokens: think ? 4096 : 2048,
                 think,
-                usePortkey: modelInfo.provider === 'openai-glass',
-                portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
             });
 
             const stream = messages => this._streamAnswer(streamingLLM, messages, sessionId, signal);

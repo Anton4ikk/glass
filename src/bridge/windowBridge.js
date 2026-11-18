@@ -15,8 +15,6 @@ module.exports = {
     ipcMain.on('hide-settings-window', () => windowManager.hideSettingsWindow());
     ipcMain.on('cancel-hide-settings-window', () => windowManager.cancelHideSettingsWindow());
 
-    ipcMain.handle('open-login-page', () => windowManager.openLoginPage());
-    ipcMain.handle('open-personalize-page', () => windowManager.openLoginPage());
     ipcMain.handle('move-window-step', (event, direction) => windowManager.moveWindowStep(direction));
     ipcMain.handle('open-external', (event, url) => shell.openExternal(url));
 

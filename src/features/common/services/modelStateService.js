@@ -1,46 +1,28 @@
 const { EventEmitter } = require('events');
 const Store = require('electron-store');
 const { PROVIDERS, getProviderClass } = require('../ai/factory');
-const encryptionService = require('./encryptionService');
 const providerSettingsRepository = require('../repositories/providerSettings');
-const authService = require('./authService');
+const { LOCAL_UID } = require('../config/localUser');
 const ollamaModelRepository = require('../repositories/ollamaModel');
 
 class ModelStateService extends EventEmitter {
     constructor() {
         super();
-        this.authService = authService;
         // electron-store는 오직 레거시 데이터 마이그레이션 용도로만 사용됩니다.
         this.store = new Store({ name: 'pickle-glass-model-state' });
     }
 
     async initialize() {
         console.log('[ModelStateService] Initializing one-time setup...');
-        await this._initializeEncryption();
         await this._runMigrations();
         this.setupLocalAIStateSync();
         await this._autoSelectAvailableModels([], true);
         console.log('[ModelStateService] One-time setup complete.');
     }
 
-    async _initializeEncryption() {
-        try {
-            const rows = await providerSettingsRepository.getRawApiKeys();
-            if (rows.some(r => r.api_key && encryptionService.looksEncrypted(r.api_key))) {
-                console.log('[ModelStateService] Encrypted keys detected, initializing encryption...');
-                const userIdForMigration = this.authService.getCurrentUserId();
-                await encryptionService.initializeKey(userIdForMigration);
-            } else {
-                console.log('[ModelStateService] No encrypted keys detected, skipping encryption initialization.');
-            }
-        } catch (err) {
-            console.warn('[ModelStateService] Error while checking encrypted keys:', err.message);
-        }
-    }
-
     async _runMigrations() {
         console.log('[ModelStateService] Checking for data migrations...');
-        const userId = this.authService.getCurrentUserId();
+        const userId = LOCAL_UID;
         
         try {
             const sqliteClient = require('./sqliteClient');
@@ -179,57 +161,16 @@ class ModelStateService extends EventEmitter {
         }
     }
     
-    async setFirebaseVirtualKey(virtualKey) {
-        console.log(`[ModelStateService] Setting Firebase virtual key.`);
-
-        // 키를 설정하기 전에, 이전에 openai-glass 키가 있었는지 확인합니다.
-        const previousSettings = await providerSettingsRepository.getByProvider('openai-glass');
-        const wasPreviouslyConfigured = !!previousSettings?.api_key;
-
-        // 항상 새로운 가상 키로 업데이트합니다.
-        await this.setApiKey('openai-glass', virtualKey);
-
-        if (virtualKey) {
-            // 이전에 설정된 적이 없는 경우 (최초 로그인)에만 모델을 강제로 변경합니다.
-            if (!wasPreviouslyConfigured) {
-                console.log('[ModelStateService] First-time setup for openai-glass, setting default models.');
-                const llmModel = PROVIDERS['openai-glass']?.llmModels[0];
-                const sttModel = PROVIDERS['openai-glass']?.sttModels[0];
-                if (llmModel) await this.setSelectedModel('llm', llmModel.id);
-                if (sttModel) await this.setSelectedModel('stt', sttModel.id);
-            } else {
-                console.log('[ModelStateService] openai-glass key updated, but respecting user\'s existing model selection.');
-            }
-        } else {
-            // 로그아웃 시, 현재 활성화된 모델이 openai-glass인 경우에만 다른 모델로 전환합니다.
-            const selected = await this.getSelectedModels();
-            const llmProvider = this.getProviderForModel(selected.llm, 'llm');
-            const sttProvider = this.getProviderForModel(selected.stt, 'stt');
-            
-            const typesToReselect = [];
-            if (llmProvider === 'openai-glass') typesToReselect.push('llm');
-            if (sttProvider === 'openai-glass') typesToReselect.push('stt');
-
-            if (typesToReselect.length > 0) {
-                console.log('[ModelStateService] Logged out, re-selecting models for:', typesToReselect.join(', '));
-                await this._autoSelectAvailableModels(typesToReselect);
-            }
-        }
-    }
-
     async setApiKey(provider, key) {
         console.log(`[ModelStateService] setApiKey for ${provider}`);
         if (!provider) {
             throw new Error('Provider is required');
         }
 
-        // 'openai-glass'는 자체 인증 키를 사용하므로 유효성 검사를 건너뜁니다.
-        if (provider !== 'openai-glass') {
-            const validationResult = await this.validateApiKey(provider, key);
-            if (!validationResult.success) {
-                console.warn(`[ModelStateService] API key validation failed for ${provider}: ${validationResult.error}`);
-                return validationResult;
-            }
+        const validationResult = await this.validateApiKey(provider, key);
+        if (!validationResult.success) {
+            console.warn(`[ModelStateService] API key validation failed for ${provider}: ${validationResult.error}`);
+            return validationResult;
         }
 
         const finalKey = (provider === 'ollama' || provider === 'whisper') ? 'local' : key;
@@ -248,9 +189,7 @@ class ModelStateService extends EventEmitter {
         const allSettings = await providerSettingsRepository.getAll();
         const apiKeys = {};
         allSettings.forEach(s => {
-            if (s.provider !== 'openai-glass') {
-                apiKeys[s.provider] = s.api_key;
-            }
+            apiKeys[s.provider] = s.api_key;
         });
         return apiKeys;
     }
@@ -269,18 +208,9 @@ class ModelStateService extends EventEmitter {
     }
 
     /**
-     * 사용자가 Firebase에 로그인했는지 확인합니다.
-     */
-    isLoggedInWithFirebase() {
-        return this.authService.getCurrentUser().isLoggedIn;
-    }
-
-    /**
      * 유효한 API 키가 하나라도 설정되어 있는지 확인합니다.
      */
     async hasValidApiKey() {
-        if (this.isLoggedInWithFirebase()) return true;
-        
         const allSettings = await providerSettingsRepository.getAll();
         return allSettings.some(s => s.api_key && s.api_key.trim().length > 0);
     }
@@ -444,7 +374,6 @@ class ModelStateService extends EventEmitter {
     }
 
     async areProvidersConfigured() {
-        if (this.isLoggedInWithFirebase()) return true;
         const allSettings = await providerSettingsRepository.getAll();
         const apiKeyMap = {};
         allSettings.forEach(s => apiKeyMap[s.provider] = s.api_key);

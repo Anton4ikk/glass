@@ -1,8 +1,7 @@
-let spawn, path, EventEmitter;
+let spawn, EventEmitter;
 
 if (typeof window === 'undefined') {
     spawn = require('child_process').spawn;
-    path = require('path');
     EventEmitter = require('events').EventEmitter;
 } else {
     class DummyEventEmitter {
@@ -27,6 +26,8 @@ const MAX_UTTERANCE_MS = 12000;         // force a cut during long monologues
 const MIN_SPEECH_MS = 300;              // ignore clicks and short bursts
 const PRE_ROLL_MS = 300;                // keep audio just before speech onset
 const CLOSE_DRAIN_TIMEOUT_MS = 10000;   // total time close() may wait for the last utterances
+// Half the cores of an 8-core M1: the LLM, the browser and the call share the machine.
+const { WHISPER_THREADS } = require('../../services/whisperServer');
 
 // Phrases whisper produces from non-speech audio (artifacts of its subtitle
 // training data). Bracketed tags are stripped separately.
@@ -93,11 +94,15 @@ class WhisperSTTSession extends EventEmitter {
         this.speechMs = 0;
         this.isProcessing = false;
         this.currentRun = null;
+        // Shared whisper-server with the model loaded; null means whisper-cli per utterance.
+        this.server = null;
+        this.inflight = null;
     }
 
     async initialize() {
         try {
             await this.whisperService.ensureModelAvailable(this.model);
+            await this.acquireServer();
             this.isRunning = true;
             this.startProcessingLoop();
             return true;
@@ -105,6 +110,17 @@ class WhisperSTTSession extends EventEmitter {
             console.error('[WhisperSTT] Initialization error:', error);
             this.emit('error', error);
             return false;
+        }
+    }
+
+    async acquireServer() {
+        try {
+            const [cliPath, modelPath] = await Promise.all([this.whisperService.getWhisperPath?.(), this.whisperService.getModelPath?.(this.model)]);
+            if (!cliPath || !modelPath) return;
+            this.server = await require('../../services/whisperServer').acquire(cliPath, modelPath);
+        } catch (error) {
+            console.warn(`[WhisperSTT-${this.sessionId}] whisper-server unavailable, using whisper-cli per utterance:`, error.message);
+            this.server = null;
         }
     }
 
@@ -144,109 +160,114 @@ class WhisperSTTSession extends EventEmitter {
         }
 
         try {
-            const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId, INPUT_SAMPLE_RATE);
-            
-            if (!tempFile || typeof tempFile !== 'string') {
-                console.error('[WhisperSTT] Invalid temp file path:', tempFile);
-                this.isProcessing = false;
-                return;
+            let result = null;
+            if (this.server) {
+                try {
+                    result = await this._transcribeWithServer(audioData);
+                } catch (error) {
+                    // close() aborted the request on purpose: nothing to fall back to.
+                    if (!this.isRunning) return;
+                    console.warn(`[WhisperSTT-${this.sessionId}] whisper-server failed, using whisper-cli:`, error.message);
+                }
             }
-            
+            if (!result) result = await this._transcribeWithCli(audioData);
+            if (result) await this._handleResult(audioData, result);
+        } catch (error) {
+            console.error('[WhisperSTT] Processing error:', error);
+            this.emit('error', error);
+        } finally {
+            this.isProcessing = false;
+        }
+    }
+
+    /** @returns {Promise<{code: number, output: string, errorOutput: string}>} */
+    async _transcribeWithServer(audioData) {
+        const wav = Buffer.concat([this.whisperService.createWavHeader(audioData.length, INPUT_SAMPLE_RATE), audioData]);
+        this.inflight = new AbortController();
+        try {
+            const output = await this.server.transcribe(wav, this.language, this.inflight.signal);
+            return { code: 0, output, errorOutput: '' };
+        } finally {
+            this.inflight = null;
+        }
+    }
+
+    /** One whisper-cli run (loads the model each time). Null if it could not start. */
+    async _transcribeWithCli(audioData) {
+        const tempFile = await this.whisperService.saveAudioToTemp(audioData, this.sessionId, INPUT_SAMPLE_RATE);
+        if (!tempFile || typeof tempFile !== 'string') {
+            console.error('[WhisperSTT] Invalid temp file path:', tempFile);
+            return null;
+        }
+        try {
             const whisperPath = await this.whisperService.getWhisperPath();
             const modelPath = await this.whisperService.getModelPath(this.model);
-
             if (!whisperPath || !modelPath) {
                 console.error('[WhisperSTT] Invalid whisper or model path:', { whisperPath, modelPath });
-                this.isProcessing = false;
-                return;
+                return null;
             }
-
             // close() may have given up waiting while the file was being written.
-            if (!this.isRunning) {
-                this.isProcessing = false;
-                await this.whisperService.cleanupTempFile(tempFile);
-                return;
-            }
+            if (!this.isRunning) return null;
 
+            // No --output-txt/--output-json: the text is read from stdout (those
+            // files are named "<input>.wav.txt" and piled up in temp/). No
+            // --print-progress: it is a valueless toggle, and a value after it is
+            // parsed as a second input file.
             this.process = spawn(whisperPath, [
                 '-m', modelPath,
                 '-f', tempFile,
                 '--no-timestamps',
-                // No --output-txt/--output-json: the text is read from stdout,
-                // and whisper-cli names those files "<input>.wav.txt", which
-                // cleanupTempFile never matched, so they piled up in temp/.
-                // whisperService.logTranscription() keeps the debug trail instead.
                 '--language', this.language,
-                '--threads', '4'
-                // No --print-progress: it is a valueless toggle in whisper-cli,
-                // so the 'false' that used to follow it was parsed as a second
-                // input file ("error: input file not found 'false'") and could
-                // make the run exit non-zero, discarding a good transcription.
-                // Progress printing is off by default anyway.
+                '--threads', String(WHISPER_THREADS),
             ]);
 
             let output = '';
             let errorOutput = '';
-
-            this.process.stdout.on('data', (data) => {
-                output += data.toString();
-            });
-
-            this.process.stderr.on('data', (data) => {
-                errorOutput += data.toString();
-            });
-
+            this.process.stdout.on('data', data => { output += data.toString(); });
+            this.process.stderr.on('data', data => { errorOutput += data.toString(); });
             // Without a listener a failed spawn would throw from the event emitter.
-            this.process.on('error', (error) => {
-                errorOutput += error.message;
-            });
+            this.process.on('error', error => { errorOutput += error.message; });
 
-            await new Promise(resolve => this.process.on('close', async (code) => {
-                this.process = null;
-                this.isProcessing = false;
-                
-                let transcription = '';
-                let emitted = false;
-                if (code === 0 && output.trim()) {
-                    transcription = cleanTranscription(output);
-                    if (transcription && transcription !== this.lastTranscription) {
-                        emitted = true;
-                        this.lastTranscription = transcription;
-                        console.log(`[WhisperSTT-${this.sessionId}] Transcription: "${transcription}"`);
-                        this.emit('transcription', {
-                            text: transcription,
-                            timestamp: Date.now(),
-                            confidence: 1.0,
-                            sessionId: this.sessionId
-                        });
-                    }
-                } else if (errorOutput && this.isRunning) {
-                    // Not logged after close(): then the run was killed on purpose.
-                    console.error(`[WhisperSTT-${this.sessionId}] Process error:`, errorOutput);
-                }
-
-                // Includes chunks the filters dropped, which the DB never sees.
-                await this.whisperService.logTranscription?.({
-                    session: this.sessionId,
-                    model: this.model,
-                    language: this.language,
-                    audioSec: +(audioData.length / BYTES_PER_SECOND).toFixed(2),
-                    code,
-                    raw: output.trim(),
-                    text: transcription,
-                    emitted,
-                    ...(code !== 0 && errorOutput ? { error: errorOutput.slice(-500) } : {}),
-                });
-
-                await this.whisperService.cleanupTempFile(tempFile);
-                resolve();
-            }));
-
-        } catch (error) {
-            this.isProcessing = false;
-            console.error('[WhisperSTT] Processing error:', error);
-            this.emit('error', error);
+            const code = await new Promise(resolve => this.process.on('close', resolve));
+            this.process = null;
+            return { code, output, errorOutput };
+        } finally {
+            await this.whisperService.cleanupTempFile(tempFile);
         }
+    }
+
+    async _handleResult(audioData, { code, output, errorOutput }) {
+        let transcription = '';
+        let emitted = false;
+        if (code === 0 && output.trim()) {
+            transcription = cleanTranscription(output);
+            if (transcription && transcription !== this.lastTranscription) {
+                emitted = true;
+                this.lastTranscription = transcription;
+                this.emit('transcription', {
+                    text: transcription,
+                    timestamp: Date.now(),
+                    confidence: 1.0,
+                    sessionId: this.sessionId,
+                });
+            }
+        } else if (errorOutput && this.isRunning) {
+            // Not logged after close(): then the run was killed on purpose.
+            console.error(`[WhisperSTT-${this.sessionId}] Process error:`, errorOutput);
+        }
+
+        // Includes chunks the filters dropped, which the DB never sees.
+        await this.whisperService.logTranscription?.({
+            session: this.sessionId,
+            model: this.model,
+            language: this.language,
+            audioSec: +(audioData.length / BYTES_PER_SECOND).toFixed(2),
+            code,
+            raw: output.trim(),
+            text: transcription,
+            emitted,
+            ...(code !== 0 && errorOutput ? { error: errorOutput.slice(-500) } : {}),
+        });
     }
 
     sendRealtimeInput(audioData) {
@@ -321,6 +342,9 @@ class WhisperSTTSession extends EventEmitter {
             this.process.kill('SIGTERM');
             this.process = null;
         }
+        this.inflight?.abort();
+        this.server?.release();
+        this.server = null;
 
         this.removeAllListeners();
     }

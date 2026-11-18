@@ -162,15 +162,43 @@ describe('SummaryService live analysis scheduling', () => {
         assert.deepEqual(runs, [1]);
     });
 
-    test('turns arriving during a run are covered by exactly one follow-up run', async () => {
+    test('turns arriving during a run are covered by exactly one follow-up run', async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
         const { service, runs } = makeService();
         const first = service.runLiveAnalysis();
         service.conversationHistory.push('them: a', 'them: b');
         await service.runLiveAnalysis();
         await service.runLiveAnalysis();
+        t.mock.timers.tick(20);
         await first;
-        await new Promise(resolve => setTimeout(resolve, 60));
+        // The follow-up waits for the minimum interval instead of starting right away.
+        t.mock.timers.tick(11000);
+        assert.deepEqual(runs, [0]);
+        t.mock.timers.tick(1000);
+        t.mock.timers.tick(20);
         assert.deepEqual(runs, [0, 2]);
+    });
+
+    test('a steady stream of turns is analyzed about once per interval, not per turn', async t => {
+        t.mock.timers.enable({ apis: ['setTimeout', 'Date'] });
+        const service = new SummaryService();
+        const runs = [];
+        service.runAnalysis = async () => {
+            runs.push(Date.now());
+            service.lastAnalyzedCount = service.conversationHistory.length;
+        };
+        // A turn every 2 s for 30 s.
+        for (let i = 0; i < 15; i++) {
+            service.addConversationTurn('Them', `turn ${i}`);
+            t.mock.timers.tick(2000);
+            await Promise.resolve();
+        }
+        t.mock.timers.tick(15000);
+        await Promise.resolve();
+        // Mocked Date reads the end of the tick in which the timer fired (1.5 s timer, 2 s ticks).
+        assert.ok(runs[0] <= 2000, `the first turn is analyzed right away: ${JSON.stringify(runs)}`);
+        assert.ok(runs.length <= 4, `expected about one run per 12 s, got ${runs.length}`);
+        for (let i = 1; i < runs.length; i++) assert.ok(runs[i] - runs[i - 1] >= 12000);
     });
 });
 

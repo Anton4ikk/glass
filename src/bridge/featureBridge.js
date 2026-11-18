@@ -1,7 +1,6 @@
 // src/bridge/featureBridge.js
 const { ipcMain, app, BrowserWindow } = require('electron');
 const settingsService = require('../features/settings/settingsService');
-const authService = require('../features/common/services/authService');
 const whisperService = require('../features/common/services/whisperService');
 const ollamaService = require('../features/common/services/ollamaService');
 const modelStateService = require('../features/common/services/modelStateService');
@@ -11,19 +10,18 @@ const localAIManager = require('../features/common/services/localAIManager');
 const askService = require('../features/ask/askService');
 const listenService = require('../features/listen/listenService');
 const permissionService = require('../features/common/services/permissionService');
-const encryptionService = require('../features/common/services/encryptionService');
 
 module.exports = {
   // Renderer로부터의 요청을 수신하고 서비스로 전달
   initialize() {
     // Settings Service
     ipcMain.handle('settings:getPresets', async () => await settingsService.getPresets());
-    ipcMain.handle('settings:get-auto-update', async () => await settingsService.getAutoUpdateSetting());
-    ipcMain.handle('settings:set-auto-update', async (event, isEnabled) => await settingsService.setAutoUpdateSetting(isEnabled));
     ipcMain.handle('settings:get-stt-language', async () => await settingsService.getSttLanguageSetting());
     ipcMain.handle('settings:set-stt-language', async (event, language) => await settingsService.setSttLanguageSetting(language));
     ipcMain.handle('settings:get-ask-thinking', async () => await settingsService.getAskThinkingSetting());
     ipcMain.handle('settings:set-ask-thinking', async (event, enabled) => await settingsService.setAskThinkingSetting(enabled));
+    ipcMain.handle('settings:get-about-me', async () => await settingsService.getAboutMeSetting());
+    ipcMain.handle('settings:set-about-me', async (event, text) => await settingsService.setAboutMeSetting(text));
     ipcMain.handle('settings:get-model-settings', async () => await settingsService.getModelSettings());
     ipcMain.handle('settings:clear-api-key', async (e, { provider }) => await settingsService.clearApiKey(provider));
     ipcMain.handle('settings:set-selected-model', async (e, { type, modelId }) => await settingsService.setSelectedModel(type, modelId));    
@@ -44,18 +42,6 @@ module.exports = {
     ipcMain.handle('check-system-permissions', async () => await permissionService.checkSystemPermissions());
     ipcMain.handle('request-microphone-permission', async () => await permissionService.requestMicrophonePermission());
     ipcMain.handle('open-system-preferences', async (event, section) => await permissionService.openSystemPreferences(section));
-    ipcMain.handle('mark-keychain-completed', async () => await permissionService.markKeychainCompleted());
-    ipcMain.handle('check-keychain-completed', async () => await permissionService.checkKeychainCompleted());
-    ipcMain.handle('initialize-encryption-key', async () => {
-        const userId = authService.getCurrentUserId();
-        await encryptionService.initializeKey(userId);
-        return { success: true };
-    });
-
-    // User/Auth
-    ipcMain.handle('get-current-user', () => authService.getCurrentUser());
-    ipcMain.handle('start-firebase-auth', async () => await authService.startFirebaseAuthFlow());
-    ipcMain.handle('firebase-logout', async () => await authService.signOut());
 
     // App
     ipcMain.handle('quit-application', () => app.quit());

@@ -1,53 +1,18 @@
 'use client'
 
 import { ExternalLink } from 'lucide-react'
-import { useRedirectIfNotAuth } from '@/utils/auth'
+import SettingsTabs from '@/components/SettingsTabs'
 
 export default function PrivacySettingsPage() {
-  const userInfo = useRedirectIfNotAuth()
-
-  if (!userInfo) {
-    return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gray-600 mx-auto"></div>
-          <p className="mt-4 text-gray-600">Loading...</p>
-        </div>
-      </div>
-    )
-  }
-
-  const tabs = [
-    { id: 'profile', name: 'Personal profile', href: '/settings' },
-    { id: 'privacy', name: 'Data & privacy', href: '/settings/privacy' },
-    { id: 'billing', name: 'Billing', href: '/settings/billing' },
-  ]
-
   return (
     <div className="bg-stone-50 min-h-screen">
       <div className="px-8 py-8">
         <div className="mb-6">
           <p className="text-xs text-gray-500 mb-1">Settings</p>
-          <h1 className="text-3xl font-bold text-gray-900">Personal settings</h1>
+          <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
         </div>
         
-        <div className="mb-8">
-          <nav className="flex space-x-10">
-            {tabs.map((tab) => (
-              <a
-                key={tab.id}
-                href={tab.href}
-                className={`pb-4 px-2 border-b-2 font-medium text-sm transition-colors ${
-                  tab.id === 'privacy'
-                    ? 'border-gray-900 text-gray-900'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-                }`}
-              >
-                {tab.name}
-              </a>
-            ))}
-          </nav>
-        </div>
+        <SettingsTabs active="privacy" />
 
         <div className="grid grid-cols-2 gap-6">
           <div className="bg-white border border-gray-200 rounded-lg p-6 flex flex-col">

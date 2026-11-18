@@ -183,8 +183,6 @@ class SttService {
             // Cloud providers ignore the model (they use a fixed one); Whisper needs it.
             model: modelInfo.model,
             language: effectiveLanguage,
-            usePortkey: modelInfo.provider === 'openai-glass',
-            portkeyVirtualKey: modelInfo.provider === 'openai-glass' ? modelInfo.apiKey : undefined,
             // Whisper keeps a separate segmenter per session type.
             sessionType: speaker === 'Me' ? 'my' : 'their',
             callbacks: {

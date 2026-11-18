@@ -12,15 +12,45 @@ class TrayService {
         this.store = null;
         this.keybinds = {};
         this.isListening = false;
+        this.initialized = false;
+        this.disposed = false;
     }
 
     initialize() {
-        if (this.tray) return this.tray;
+        if (this.initialized) return this.tray;
+        this.initialized = true;
+        this.disposed = false;
 
         this._getStore();
 
-        this.tray = new Tray(this._buildIcon(false));
-        this.tray.setToolTip('Glass');
+        internalBridge.on('listen:sessionStateChanged', ({ isActive }) => {
+            this.isListening = !!isActive;
+            this._refreshIcon();
+            this._syncStaticMenu();
+        });
+        internalBridge.on('reregister-shortcuts', () => this._refreshKeybinds());
+        // Deferred: both toggles can fire from the tray's own menu, and the tray
+        // shouldn't be destroyed from inside its menu's click handler.
+        internalBridge.on('window:contentProtectionChanged', () => setImmediate(() => this.applyTrayVisibility()));
+
+        this._refreshKeybinds();
+        this.applyDockPreference();
+        this.applyTrayVisibility();
+
+        return this.tray;
+    }
+
+    destroy() {
+        // Set first so a late contentProtectionChanged can't recreate the icon during quit.
+        this.disposed = true;
+        this._destroyTray();
+    }
+
+    _createTray() {
+        if (this.tray && !this.tray.isDestroyed()) return;
+
+        this.tray = new Tray(this._buildIcon(this.isListening));
+        this.tray.setToolTip(this.isListening ? 'Glass - listening' : 'Glass');
         if (process.platform === 'darwin') {
             this.tray.setIgnoreDoubleClickEvents(true);
         }
@@ -33,26 +63,39 @@ class TrayService {
             this.tray.on('click', () => this._popUpMenu());
             this.tray.on('right-click', () => this._popUpMenu());
         }
-
-        internalBridge.on('listen:sessionStateChanged', ({ isActive }) => {
-            this.isListening = !!isActive;
-            this._refreshIcon();
-            this._syncStaticMenu();
-        });
-        internalBridge.on('reregister-shortcuts', () => this._refreshKeybinds());
-
-        this._refreshKeybinds();
-        this.applyDockPreference();
-
         console.log('[TrayService] Tray icon created.');
-        return this.tray;
     }
 
-    destroy() {
+    _destroyTray() {
         if (this.tray && !this.tray.isDestroyed()) {
             this.tray.destroy();
+            console.log('[TrayService] Tray icon removed.');
         }
         this.tray = null;
+    }
+
+    /* ────────────────[ visibility ]─────────────── */
+
+    // A menu bar / tray icon shows up in a full-screen share even though the Glass
+    // windows don't, so it can optionally be removed while invisibility is on.
+    // Electron's Tray can't be hidden, only destroyed and recreated.
+    applyTrayVisibility() {
+        if (this.disposed) return;
+        const { getContentProtectionStatus } = require('../../window/windowManager');
+        if (this._getHideTrayWhileInvisiblePreference() && getContentProtectionStatus()) {
+            this._destroyTray();
+        } else {
+            this._createTray();
+        }
+    }
+
+    _getHideTrayWhileInvisiblePreference() {
+        return this._getStore().get('hideTrayWhileInvisible', false);
+    }
+
+    _setHideTrayWhileInvisiblePreference(hide) {
+        this._getStore().set('hideTrayWhileInvisible', hide);
+        setImmediate(() => this.applyTrayVisibility());
     }
 
     /* ────────────────[ icon ]─────────────── */
@@ -198,6 +241,13 @@ class TrayService {
                     setContentProtection(menuItem.checked);
                     this._syncStaticMenu();
                 },
+            },
+            {
+                // To get the icon back: Settings -> Disable Invisibility, then untick this.
+                label: process.platform === 'darwin' ? 'Hide Menu Bar Icon While Invisible' : 'Hide Tray Icon While Invisible',
+                type: 'checkbox',
+                checked: this._getHideTrayWhileInvisiblePreference(),
+                click: menuItem => this._setHideTrayWhileInvisiblePreference(menuItem.checked),
             },
         ];
 

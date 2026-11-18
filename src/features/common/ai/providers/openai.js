@@ -1,6 +1,5 @@
 const OpenAI = require('openai');
 const WebSocket = require('ws');
-const { Portkey } = require('portkey-ai');
 const { Readable } = require('stream');
 const { getProviderForModel } = require('../factory.js');
 
@@ -37,21 +36,11 @@ class OpenAIProvider {
  * @param {string} opts.apiKey - OpenAI API key
  * @param {string} [opts.language='en'] - Language code
  * @param {object} [opts.callbacks] - Event callbacks
- * @param {boolean} [opts.usePortkey=false] - Whether to use Portkey
- * @param {string} [opts.portkeyVirtualKey] - Portkey virtual key
  * @returns {Promise<object>} STT session
  */
-async function createSTT({ apiKey, language = 'en', callbacks = {}, usePortkey = false, portkeyVirtualKey, sessionType = 'unknown', ...config }) {
-  const keyType = usePortkey ? 'vKey' : 'apiKey';
-  const key = usePortkey ? (portkeyVirtualKey || apiKey) : apiKey;
-
-  const wsUrl = keyType === 'apiKey'
-    ? 'wss://api.openai.com/v1/realtime?intent=transcription'
-    : 'wss://api.portkey.ai/v1/realtime?intent=transcription';
-
-  const headers = keyType === 'apiKey'
-    ? { 'Authorization': `Bearer ${key}`, 'OpenAI-Beta': 'realtime=v1' }
-    : { 'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu', 'x-portkey-virtual-key': key, 'OpenAI-Beta': 'realtime=v1' };
+async function createSTT({ apiKey, language = 'en', callbacks = {}, sessionType = 'unknown', ...config }) {
+  const wsUrl = 'wss://api.openai.com/v1/realtime?intent=transcription';
+  const headers = { 'Authorization': `Bearer ${apiKey}`, 'OpenAI-Beta': 'realtime=v1' };
 
   const isTheirSession = sessionType === 'their';
 
@@ -174,52 +163,22 @@ async function createSTT({ apiKey, language = 'en', callbacks = {}, usePortkey =
  * @param {string} [opts.model='gpt-4.1'] - Model name
  * @param {number} [opts.temperature=0.7] - Temperature
  * @param {number} [opts.maxTokens=2048] - Max tokens
- * @param {boolean} [opts.usePortkey=false] - Whether to use Portkey
- * @param {string} [opts.portkeyVirtualKey] - Portkey virtual key
  * @returns {object} LLM instance
  */
-function createLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxTokens = 2048, usePortkey = false, portkeyVirtualKey, ...config }) {
+function createLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxTokens = 2048, ...config }) {
   const client = new OpenAI({ apiKey });
-  
+
   const callApi = async (messages) => {
-    if (!usePortkey) {
-      const response = await client.chat.completions.create({
-        model: model,
-        messages: messages,
-        temperature: temperature,
-        max_tokens: maxTokens
-      });
-      return {
-        content: response.choices[0].message.content.trim(),
-        raw: response
-      };
-    } else {
-      const fetchUrl = 'https://api.portkey.ai/v1/chat/completions';
-      const response = await fetch(fetchUrl, {
-        method: 'POST',
-        headers: {
-            'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu',
-            'x-portkey-virtual-key': portkeyVirtualKey || apiKey,
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            model: model,
-            messages,
-            temperature,
-            max_tokens: maxTokens,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Portkey API error: ${response.status} ${response.statusText}`);
-      }
-
-      const result = await response.json();
-      return {
-        content: result.choices[0].message.content.trim(),
-        raw: result
-      };
-    }
+    const response = await client.chat.completions.create({
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      max_tokens: maxTokens
+    });
+    return {
+      content: response.choices[0].message.content.trim(),
+      raw: response
+    };
   };
 
   return {
@@ -270,27 +229,16 @@ function createLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxToken
  * @param {string} [opts.model='gpt-4.1'] - Model name
  * @param {number} [opts.temperature=0.7] - Temperature
  * @param {number} [opts.maxTokens=2048] - Max tokens
- * @param {boolean} [opts.usePortkey=false] - Whether to use Portkey
- * @param {string} [opts.portkeyVirtualKey] - Portkey virtual key
  * @returns {object} Streaming LLM instance
  */
-function createStreamingLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxTokens = 2048, usePortkey = false, portkeyVirtualKey, ...config }) {
+function createStreamingLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxTokens = 2048, ...config }) {
   return {
     streamChat: async (messages) => {
-      const fetchUrl = usePortkey 
-        ? 'https://api.portkey.ai/v1/chat/completions'
-        : 'https://api.openai.com/v1/chat/completions';
-      
-      const headers = usePortkey
-        ? {
-            'x-portkey-api-key': 'gRv2UGRMq6GGLJ8aVEB4e7adIewu',
-            'x-portkey-virtual-key': portkeyVirtualKey || apiKey,
-            'Content-Type': 'application/json',
-          }
-        : {
-            Authorization: `Bearer ${apiKey}`,
-            'Content-Type': 'application/json',
-          };
+      const fetchUrl = 'https://api.openai.com/v1/chat/completions';
+      const headers = {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+      };
 
       const response = await fetch(fetchUrl, {
         method: 'POST',
