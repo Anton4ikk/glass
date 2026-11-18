@@ -31,8 +31,7 @@ describe('ollamaStreamSource', () => {
         await reader.read();
         await reader.cancel('New request received.');
 
-        // Before the fix, these events hit a closed controller and threw an
-        // uncaught "Controller is already closed".
+        // Must not reach the closed controller (uncaught "Controller is already closed").
         body.emit('data', Buffer.from(line({ message: { content: 'late' } })));
         body.emit('end');
         await new Promise(resolve => setImmediate(resolve));

@@ -10,6 +10,12 @@ class ShortcutsService {
         this.mouseEventsIgnored = false;
         this.windowPool = null;
         this.allWindowVisibility = true;
+        // Previous/next answer: { accelerator: handler }, registered only while
+        // the Ask window is on screen. A global shortcut takes the key from
+        // every app, and Cmd+[ is outdent in code editors.
+        this.answerShortcuts = {};
+        this.answerShortcutsEnabled = false;
+        this.answerShortcutsActive = new Set();
     }
 
     initialize(windowPool) {
@@ -18,6 +24,7 @@ class ShortcutsService {
             console.log('[ShortcutsService] Reregistering shortcuts due to header state change.');
             this.registerShortcuts();
         });
+        internalBridge.on('ask:visibilityChanged', () => this.syncAnswerShortcuts());
         console.log('[ShortcutsService] Initialized with dependencies and event listener.');
     }
 
@@ -26,7 +33,7 @@ class ShortcutsService {
         const shortcutWin = this.windowPool.get('shortcut-settings');
         shortcutWin.webContents.send('shortcut:loadShortcuts', keybinds);
 
-        globalShortcut.unregisterAll();
+        this._unregisterEverything();
         internalBridge.emit('window:requestVisibility', { name: 'shortcut-settings', visible: true });
         console.log('[ShortcutsService] Shortcut settings window opened.');
         return { success: true };
@@ -148,8 +155,9 @@ class ShortcutsService {
             return;
         }
         const keybinds = await this.loadKeybinds();
-        globalShortcut.unregisterAll();
-        
+        this._unregisterEverything();
+        this.answerShortcuts = {};
+
         const header = this.windowPool.get('header');
         const mainWindow = header;
 
@@ -178,8 +186,7 @@ class ShortcutsService {
         // --- Hardcoded shortcuts ---
         const isMac = process.platform === 'darwin';
         const modifier = isMac ? 'Cmd' : 'Ctrl';
-        
-        // Monitor switching
+
         const displays = screen.getAllDisplays();
         if (displays.length > 1) {
             displays.forEach((display, index) => {
@@ -188,7 +195,6 @@ class ShortcutsService {
             });
         }
 
-        // Edge snapping
         const edgeDirections = [
             { key: `${modifier}+Shift+Left`, direction: 'left' },
             { key: `${modifier}+Shift+Right`, direction: 'right' },
@@ -220,6 +226,13 @@ class ShortcutsService {
                     break;
                 case 'nextStep':
                     callback = () => askService.toggleAskButton(true);
+                    break;
+                // Registered while Ask is visible, by syncAnswerShortcuts.
+                case 'previousResponse':
+                    this.answerShortcuts[accelerator] = () => askService.showPreviousAnswer();
+                    break;
+                case 'nextResponse':
+                    this.answerShortcuts[accelerator] = () => askService.showNextAnswer();
                     break;
                 case 'scrollUp':
                     callback = () => {
@@ -258,8 +271,8 @@ class ShortcutsService {
                         }
                      };
                      break;
-                // manualScreenshot, previousResponse, nextResponse: no window handles
-                // them, and a registered global shortcut would block the key in every app.
+                // manualScreenshot: nothing handles it, and a registered global
+                // shortcut would block the key in every app.
             }
             
             if (callback) {
@@ -270,11 +283,38 @@ class ShortcutsService {
                 }
             }
         }
+        this.answerShortcutsEnabled = true;
+        this.syncAnswerShortcuts();
         console.log('[Shortcuts] All shortcuts have been registered.');
     }
 
-    unregisterAll() {
+    /** Registers the previous/next answer shortcuts while Ask is visible, and frees the keys otherwise. */
+    syncAnswerShortcuts() {
+        const ask = this.windowPool?.get('ask');
+        const wanted = this.answerShortcutsEnabled && !!ask && !ask.isDestroyed() && ask.isVisible();
+        for (const [accelerator, handler] of Object.entries(this.answerShortcuts)) {
+            const active = this.answerShortcutsActive.has(accelerator);
+            if (wanted && !active) {
+                try {
+                    if (globalShortcut.register(accelerator, handler)) this.answerShortcutsActive.add(accelerator);
+                } catch (e) {
+                    console.error(`[Shortcuts] Failed to register answer shortcut (${accelerator}):`, e.message);
+                }
+            } else if (!wanted && active) {
+                globalShortcut.unregister(accelerator);
+                this.answerShortcutsActive.delete(accelerator);
+            }
+        }
+    }
+
+    _unregisterEverything() {
         globalShortcut.unregisterAll();
+        this.answerShortcutsEnabled = false;
+        this.answerShortcutsActive.clear();
+    }
+
+    unregisterAll() {
+        this._unregisterEverything();
         console.log('[Shortcuts] All shortcuts have been unregistered.');
     }
 }

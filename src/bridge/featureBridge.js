@@ -1,4 +1,3 @@
-// src/bridge/featureBridge.js
 const { ipcMain, app, BrowserWindow } = require('electron');
 const settingsService = require('../features/settings/settingsService');
 const whisperService = require('../features/common/services/whisperService');
@@ -12,9 +11,7 @@ const listenService = require('../features/listen/listenService');
 const permissionService = require('../features/common/services/permissionService');
 
 module.exports = {
-  // Renderer로부터의 요청을 수신하고 서비스로 전달
   initialize() {
-    // Settings Service
     ipcMain.handle('settings:getPresets', async () => await settingsService.getPresets());
     ipcMain.handle('settings:get-stt-language', async () => await settingsService.getSttLanguageSetting());
     ipcMain.handle('settings:set-stt-language', async (event, language) => await settingsService.setSttLanguageSetting(language));
@@ -30,31 +27,24 @@ module.exports = {
     ipcMain.handle('settings:ensure-ollama-ready', async () => await settingsService.ensureOllamaReady());
     ipcMain.handle('settings:shutdown-ollama', async () => await settingsService.shutdownOllama());
 
-    // Shortcuts
     ipcMain.handle('settings:getCurrentShortcuts', async () => await shortcutsService.loadKeybinds());
     ipcMain.handle('shortcut:getDefaultShortcuts', async () => await shortcutsService.handleRestoreDefaults());
     ipcMain.handle('shortcut:closeShortcutSettingsWindow', async () => await shortcutsService.closeShortcutSettingsWindow());
     ipcMain.handle('shortcut:openShortcutSettingsWindow', async () => await shortcutsService.openShortcutSettingsWindow());
     ipcMain.handle('shortcut:saveShortcuts', async (event, newKeybinds) => await shortcutsService.handleSaveShortcuts(newKeybinds));
-    ipcMain.handle('shortcut:toggleAllWindowsVisibility', async () => await shortcutsService.toggleAllWindowsVisibility());
 
-    // Permissions
     ipcMain.handle('check-system-permissions', async () => await permissionService.checkSystemPermissions());
     ipcMain.handle('request-microphone-permission', async () => await permissionService.requestMicrophonePermission());
     ipcMain.handle('open-system-preferences', async (event, section) => await permissionService.openSystemPreferences(section));
 
-    // App
     ipcMain.handle('quit-application', () => app.quit());
 
-    // Whisper
     ipcMain.handle('whisper:download-model', async (event, modelId) => await whisperService.handleDownloadModel(modelId));
     ipcMain.handle('whisper:get-installed-models', async () => await whisperService.handleGetInstalledModels());
-       
-    // General
+
     ipcMain.handle('get-preset-templates', () => presetRepository.getPresetTemplates());
     ipcMain.handle('get-web-url', () => process.env.pickleglass_WEB_URL || 'http://localhost:3000');
 
-    // Ollama
     ipcMain.handle('ollama:get-status', async () => await ollamaService.handleGetStatus());
     ipcMain.handle('ollama:install', async () => await ollamaService.handleInstall());
     ipcMain.handle('ollama:start-service', async () => await ollamaService.handleStartService());
@@ -68,7 +58,6 @@ module.exports = {
     ipcMain.handle('ollama:get-warm-up-status', async () => await ollamaService.handleGetWarmUpStatus());
     ipcMain.handle('ollama:shutdown', async (event, force = false) => await ollamaService.handleShutdown(force));
 
-    // Ask
     // Ask answers with the live transcript as context, not just the screenshot.
     ipcMain.handle('ask:sendQuestionFromAsk', async (event, userPrompt) =>
         await askService.sendMessage(userPrompt, listenService.getConversationHistory()));
@@ -77,7 +66,6 @@ module.exports = {
     ipcMain.handle('ask:toggleAskButton', async () => await askService.toggleAskButton());
     ipcMain.handle('ask:closeAskWindow',  async () => await askService.closeAskWindow());
     
-    // Listen
     ipcMain.handle('listen:sendMicAudio', async (event, { data, mimeType }) =>
         await listenService.handleSendMicAudioContent(data, mimeType));
     // Windows loopback audio; the echo back to the renderer is the AEC reference.
@@ -100,7 +88,6 @@ module.exports = {
       }
     });
 
-    // ModelStateService
     ipcMain.handle('model:validate-key', async (e, { provider, key }) => await modelStateService.handleValidateKey(provider, key));
     ipcMain.handle('model:get-all-keys', async () => await modelStateService.getAllApiKeys());
     ipcMain.handle('model:set-api-key', async (e, { provider, key }) => await modelStateService.setApiKey(provider, key));
@@ -112,7 +99,6 @@ module.exports = {
     ipcMain.handle('model:get-provider-config', () => modelStateService.getProviderConfig());
     ipcMain.handle('model:re-initialize-state', async () => await modelStateService.initialize());
 
-    // LocalAIManager 이벤트를 모든 윈도우에 브로드캐스트
     localAIManager.on('install-progress', (service, data) => {
       const event = { service, ...data };
       BrowserWindow.getAllWindows().forEach(win => {
@@ -135,7 +121,6 @@ module.exports = {
         }
       });
     });
-    // Handle error-occurred events from LocalAIManager's error handling
     localAIManager.on('error-occurred', (error) => {
       BrowserWindow.getAllWindows().forEach(win => {
         if (win && !win.isDestroyed()) {
@@ -159,10 +144,8 @@ module.exports = {
       });
     });
 
-    // 주기적 상태 동기화 시작
     localAIManager.startPeriodicSync();
 
-    // ModelStateService 이벤트를 모든 윈도우에 브로드캐스트
     modelStateService.on('state-updated', (state) => {
       BrowserWindow.getAllWindows().forEach(win => {
         if (win && !win.isDestroyed()) {
@@ -185,7 +168,6 @@ module.exports = {
       });
     });
 
-    // LocalAI 통합 핸들러 추가
     ipcMain.handle('localai:install', async (event, { service, options }) => {
       return await localAIManager.installService(service, options);
     });
@@ -210,13 +192,11 @@ module.exports = {
     ipcMain.handle('localai:repair-service', async (event, service) => {
       return await localAIManager.repairService(service);
     });
-    
-    // 에러 처리 핸들러
+
     ipcMain.handle('localai:handle-error', async (event, { service, errorType, details }) => {
       return await localAIManager.handleError(service, errorType, details);
     });
-    
-    // 전체 상태 조회
+
     ipcMain.handle('localai:get-all-states', async (event) => {
       return await localAIManager.getAllServiceStates();
     });
@@ -224,7 +204,6 @@ module.exports = {
     console.log('[FeatureBridge] Initialized with all feature handlers.');
   },
 
-  // Renderer로 상태를 전송
   sendAskProgress(win, progress) {
     win.webContents.send('feature:ask:progress', progress);
   },

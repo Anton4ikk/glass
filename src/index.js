@@ -18,7 +18,6 @@ const featureBridge = require('./bridge/featureBridge');
 const windowBridge = require('./bridge/windowBridge');
 const trayService = require('./features/tray/trayService');
 
-// Global variables
 const eventBridge = new EventEmitter();
 let WEB_PORT = 3000;
 let isShuttingDown = false; // Flag to prevent infinite shutdown loop
@@ -26,7 +25,6 @@ let isShuttingDown = false; // Flag to prevent infinite shutdown loop
 // Read by settingsService and ollamaService, which would otherwise require it in a cycle.
 global.modelStateService = modelStateService;
 
-// Import and initialize OllamaService
 const ollamaService = require('./features/common/services/ollamaService');
 const ollamaModelRepository = require('./features/common/repositories/ollamaModel');
 
@@ -40,8 +38,7 @@ function focusMainWindow() {
             return true;
         }
     }
-    
-    // Fallback: focus any available window
+
     const windows = BrowserWindow.getAllWindows();
     if (windows.length > 0) {
         const mainWindow = windows[0];
@@ -72,7 +69,6 @@ app.whenReady().then(async () => {
     // Setup native loopback audio capture for Windows
     session.defaultSession.setDisplayMediaRequestHandler((request, callback) => {
         desktopCapturer.getSources({ types: ['screen'] }).then((sources) => {
-            // Grant access to the first screen found with loopback audio
             callback({ video: sources[0], audio: 'loopback' });
         }).catch((error) => {
             console.error('Failed to get desktop capturer sources:', error);
@@ -92,10 +88,8 @@ app.whenReady().then(async () => {
         windowBridge.initialize();
         setupWebDataHandlers();
 
-        // Initialize Ollama models in database
         await ollamaModelRepository.initializeDefaultModels();
 
-        // Auto warm-up selected Ollama model in background (non-blocking)
         setTimeout(async () => {
             try {
                 console.log('[index.js] Starting background Ollama model warm-up...');
@@ -103,20 +97,18 @@ app.whenReady().then(async () => {
             } catch (error) {
                 console.log('[index.js] Background warm-up failed (non-critical):', error.message);
             }
-        }, 2000); // Wait 2 seconds after app start
+        }, 2000);
 
-        // Start web server and create windows ONLY after all initializations are successful
+        // Web stack and windows only after all of the above succeeded.
         WEB_PORT = await startWebStack();
         console.log('Web front-end listening on', WEB_PORT);
         
         createWindows();
 
-        // Menu bar / system tray icon
         trayService.initialize();
 
     } catch (err) {
         console.error('>>> [index.js] Database initialization failed - some features may not work', err);
-        // Optionally, show an error dialog to the user
         dialog.showErrorBox(
             'Application Error',
             'A critical error occurred during startup. Some features might be disabled. Please restart the application.'
@@ -129,18 +121,16 @@ const withTimeout = (promise, ms) =>
     Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms))]);
 
 app.on('before-quit', async (event) => {
-    // Prevent infinite loop by checking if shutdown is already in progress
     if (isShuttingDown) {
         console.log('[Shutdown] 🔄 Shutdown already in progress, allowing quit...');
         return;
     }
     
     console.log('[Shutdown] App is about to quit. Starting graceful shutdown...');
-    
-    // Set shutdown flag to prevent infinite loop
+
     isShuttingDown = true;
-    
-    // Prevent immediate quit to allow graceful shutdown
+
+    // Hold the quit until the graceful shutdown below finishes.
     event.preventDefault();
     
     try {
@@ -153,7 +143,7 @@ app.on('before-quit', async (event) => {
         require('./features/common/services/whisperServer').killAll();
         console.log('[Shutdown] Audio capture stopped');
         
-        // 2. End all active sessions (database operations) - with error handling.
+        // 2. End all active sessions.
         try {
             await withTimeout(sessionRepository.endAllActiveSessions(), SHUTDOWN_STEP_TIMEOUT_MS);
             console.log('[Shutdown] Active sessions ended');
@@ -164,15 +154,14 @@ app.on('before-quit', async (event) => {
         // 3. Shutdown Ollama service (potentially time-consuming)
         console.log('[Shutdown] shutting down Ollama service...');
         const ollamaShutdownSuccess = await Promise.race([
-            ollamaService.shutdown(false), // Graceful shutdown
-            new Promise(resolve => setTimeout(() => resolve(false), 8000)) // 8s timeout
+            ollamaService.shutdown(false),
+            new Promise(resolve => setTimeout(() => resolve(false), 8000))
         ]);
         
         if (ollamaShutdownSuccess) {
             console.log('[Shutdown] Ollama service shut down gracefully');
         } else {
             console.log('[Shutdown] Ollama shutdown timeout, forcing...');
-            // Force shutdown if graceful failed
             try {
                 await ollamaService.shutdown(true);
             } catch (forceShutdownError) {
@@ -183,7 +172,7 @@ app.on('before-quit', async (event) => {
         // 4. The summary of the last listen session is still being written.
         await withTimeout(listenService.finalAnalysis, SHUTDOWN_STEP_TIMEOUT_MS).catch(() => {});
 
-        // 5. Close database connections (final cleanup)
+        // 5. Close the database last.
         try {
             databaseInitializer.close();
             console.log('[Shutdown] Database connections closed');
@@ -195,11 +184,9 @@ app.on('before-quit', async (event) => {
         
     } catch (error) {
         console.error('[Shutdown] Error during graceful shutdown:', error);
-        // Continue with shutdown even if there were errors
     } finally {
-        // Actually quit the app now
         console.log('[Shutdown] Exiting application...');
-        app.exit(0); // Use app.exit() instead of app.quit() to force quit
+        app.exit(0); // Unlike app.quit(), doesn't emit before-quit again.
     }
 });
 
@@ -220,9 +207,7 @@ function setupWebDataHandlers() {
         let result;
         try {
             switch (channel) {
-                // SESSION
                 case 'get-sessions':
-                    // Adapter injects UID
                     result = await sessionRepository.getAllByUserId();
                     break;
                 case 'get-session-details': {
@@ -243,7 +228,6 @@ function setupWebDataHandlers() {
                     result = await sessionRepository.deleteWithRelatedData(payload);
                     break;
                 case 'create-session': {
-                    // Adapter injects UID
                     const id = await sessionRepository.create('ask');
                     if (payload && payload.title) {
                         await sessionRepository.updateTitle(id, payload.title);
@@ -251,35 +235,27 @@ function setupWebDataHandlers() {
                     result = { id };
                     break;
                 }
-                
-                // API KEYS
+
                 case 'save-api-key':
-                    // Use ModelStateService as the single source of truth for API key management
                     result = await modelStateService.setApiKey(payload.provider, payload.apiKey);
                     break;
                 case 'check-api-key-status': {
-                    // Use ModelStateService to check API key status
                     const hasApiKey = await modelStateService.hasValidApiKey();
                     result = { hasApiKey };
                     break;
                 }
-                // PRESET
                 case 'get-presets':
-                    // Adapter injects UID
                     result = await presetRepository.getPresets();
                     break;
                 case 'create-preset':
-                    // Adapter injects UID
                     result = await presetRepository.create(payload);
                     settingsService.notifyPresetUpdate('created', result.id, payload.title);
                     break;
                 case 'update-preset':
-                    // Adapter injects UID
                     result = await presetRepository.update(payload.id, payload.data);
                     settingsService.notifyPresetUpdate('updated', payload.id, payload.data.title);
                     break;
                 case 'delete-preset':
-                    // Adapter injects UID
                     result = await presetRepository.delete(payload);
                     settingsService.notifyPresetUpdate('deleted', payload);
                     break;
@@ -351,15 +327,14 @@ async function startWebStack() {
     timestamp: Date.now()
   };
   
-  // 쓰기 가능한 임시 폴더에 런타임 설정 파일 생성
+  // Written to temp because the static export dir is read-only in the packaged app.
   const tempDir = app.getPath('temp');
   const configPath = path.join(tempDir, 'runtime-config.json');
   fs.writeFileSync(configPath, JSON.stringify(runtimeConfig, null, 2));
   console.log(`📝 Runtime config created in temp location: ${configPath}`);
 
   const frontSrv = express();
-  
-  // 프론트엔드에서 /runtime-config.json을 요청하면 임시 폴더의 파일을 제공
+
   frontSrv.get('/runtime-config.json', (req, res) => {
     res.sendFile(configPath);
   });

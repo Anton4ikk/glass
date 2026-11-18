@@ -2,15 +2,15 @@ const DOWNLOAD_CHECKSUMS = {
     ollama: {
         dmg: {
             url: 'https://ollama.com/download/Ollama.dmg',
-            sha256: null // TODO: 실제 체크섬 추가 필요 - null일 경우 체크섬 검증 스킵됨
+            sha256: null // TODO: add checksum; null skips verification
         },
         exe: {
             url: 'https://ollama.com/download/OllamaSetup.exe',
-            sha256: null // TODO: 실제 체크섬 추가 필요 - null일 경우 체크섬 검증 스킵됨
+            sha256: null // TODO: add checksum; null skips verification
         },
         linux: {
             url: 'curl -fsSL https://ollama.com/install.sh | sh',
-            sha256: null // TODO: 실제 체크섬 추가 필요 - null일 경우 체크섬 검증 스킵됨
+            sha256: null // TODO: add checksum; null skips verification
         }
     },
     whisper: {
@@ -30,21 +30,25 @@ const DOWNLOAD_CHECKSUMS = {
             'whisper-medium': {
                 url: 'https://huggingface.co/ggml-org/whisper.cpp/resolve/main/ggml-medium.bin',
                 sha256: '6c14d5adee5f86394037b4e4e8b59f1673b6cee10e3cf0b11bbdbee79c156208'
+            },
+            'whisper-large-v3-turbo': {
+                url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin',
+                sha256: '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2'
             }
         },
         binaries: {
             'v1.7.6': {
                 mac: {
                     url: 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.7.6/whisper-cpp-v1.7.6-mac-x64.zip',
-                    sha256: null // TODO: 실제 체크섬 추가 필요 - null일 경우 체크섬 검증 스킵됨
+                    sha256: null // TODO: add checksum; null skips verification
                 },
                 windows: {
                     url: 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.7.6/whisper-cpp-v1.7.6-win-x64.zip',
-                    sha256: null // TODO: 실제 체크섬 추가 필요 - null일 경우 체크섬 검증 스킵됨
+                    sha256: null // TODO: add checksum; null skips verification
                 },
                 linux: {
                     url: 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.7.6/whisper-cpp-v1.7.6-linux-x64.tar.gz',
-                    sha256: null // TODO: 실제 체크섬 추가 필요 - null일 경우 체크섬 검증 스킵됨
+                    sha256: null // TODO: add checksum; null skips verification
                 }
             }
         }

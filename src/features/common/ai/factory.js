@@ -1,5 +1,3 @@
-// factory.js
-
 /**
  * @typedef {object} ModelOption
  * @property {string} id 
@@ -66,14 +64,13 @@ const PROVIDERS = {
   'whisper': {
       name: 'Whisper (Local)',
       handler: () => {
-          // This needs to remain a function due to its conditional logic for renderer/main process
+          // Whisper runs only in the main process; the renderer gets a stub.
           if (typeof window === 'undefined') {
               const { WhisperProvider } = require("./providers/whisper");
               return new WhisperProvider();
           }
-          // Return a dummy object for the renderer process
           return {
-              validateApiKey: async () => ({ success: true }), // Mock validate for renderer
+              validateApiKey: async () => ({ success: true }),
               createSTT: () => { throw new Error('Whisper STT is only available in main process'); },
           };
       },
@@ -83,6 +80,7 @@ const PROVIDERS = {
           { id: 'whisper-base', name: 'Whisper Base (74M)' },
           { id: 'whisper-small', name: 'Whisper Small (244M)' },
           { id: 'whisper-medium', name: 'Whisper Medium (769M)' },
+          { id: 'whisper-large-v3-turbo', name: 'Whisper Large v3 Turbo (574M, recommended)' },
       ],
   },
 };
@@ -114,11 +112,9 @@ function createStreamingLLM(provider, opts) {
 function getProviderClass(providerId) {
     const providerConfig = PROVIDERS[providerId];
     if (!providerConfig) return null;
-    
-    // The handler function returns the module, from which we get the class.
+
     const module = providerConfig.handler();
-    
-    // Map provider IDs to their actual exported class names
+
     const classNameMap = {
         'openai': 'OpenAIProvider',
         'anthropic': 'AnthropicProvider',

@@ -74,8 +74,6 @@ class TrayService {
         this.tray = null;
     }
 
-    /* ────────────────[ visibility ]─────────────── */
-
     // A menu bar / tray icon shows up in a full-screen share even though the Glass
     // windows don't, so it can optionally be removed while invisibility is on.
     // Electron's Tray can't be hidden, only destroyed and recreated.
@@ -98,8 +96,6 @@ class TrayService {
         setImmediate(() => this.applyTrayVisibility());
     }
 
-    /* ────────────────[ icon ]─────────────── */
-
     _buildIcon(isListening) {
         if (process.platform === 'darwin') {
             const name = isListening ? 'glassActiveTemplate.png' : 'glassTemplate.png';
@@ -118,8 +114,6 @@ class TrayService {
         this.tray.setImage(this._buildIcon(this.isListening));
         this.tray.setToolTip(this.isListening ? 'Glass - listening' : 'Glass');
     }
-
-    /* ────────────────[ state helpers ]─────────────── */
 
     async _refreshKeybinds() {
         try {
@@ -149,8 +143,6 @@ class TrayService {
         const shortcutsService = require('../shortcuts/shortcutsService');
         await shortcutsService.toggleAllWindowsVisibility();
     }
-
-    /* ────────────────[ menu ]─────────────── */
 
     _popUpMenu() {
         if (!this.tray || this.tray.isDestroyed()) return;
@@ -272,8 +264,6 @@ class TrayService {
 
         return Menu.buildFromTemplate(template);
     }
-
-    /* ────────────────[ dock icon ]─────────────── */
 
     _getStore() {
         if (!this.store) {

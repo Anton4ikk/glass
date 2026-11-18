@@ -160,7 +160,7 @@ async function createSTT({ apiKey, language = 'en', callbacks = {}, sessionType 
  * Creates an OpenAI LLM instance
  * @param {object} opts - Configuration options
  * @param {string} opts.apiKey - OpenAI API key
- * @param {string} [opts.model='gpt-4.1'] - Model name
+ * @param {string} [opts.model='gpt-4.1-mini'] - Model name
  * @param {number} [opts.temperature=0.7] - Temperature
  * @param {number} [opts.maxTokens=2048] - Max tokens
  * @returns {object} LLM instance
@@ -222,11 +222,11 @@ function createLLM({ apiKey, model = 'gpt-4.1-mini', temperature = 0.7, maxToken
   };
 }
 
-/** 
+/**
  * Creates an OpenAI streaming LLM instance
  * @param {object} opts - Configuration options
  * @param {string} opts.apiKey - OpenAI API key
- * @param {string} [opts.model='gpt-4.1'] - Model name
+ * @param {string} [opts.model='gpt-4.1-mini'] - Model name
  * @param {number} [opts.temperature=0.7] - Temperature
  * @param {number} [opts.maxTokens=2048] - Max tokens
  * @returns {object} Streaming LLM instance

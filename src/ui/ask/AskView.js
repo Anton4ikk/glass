@@ -16,6 +16,8 @@ export class AskView extends LitElement {
         isStreaming: { type: Boolean },
         errorMessage: { type: String },
         reasoningChars: { type: Number },
+        // An earlier answer on screen: {number, count, at, replay} (see askService._viewState).
+        view: { type: Object },
     };
 
     static styles = css`
@@ -609,7 +611,6 @@ export class AskView extends LitElement {
             gap: 4px;
         }
 
-        /* ────────────────[ GLASS BYPASS ]─────────────── */
         :host-context(body.has-glass) .ask-container,
         :host-context(body.has-glass) .response-header,
         :host-context(body.has-glass) .response-icon,
@@ -712,9 +713,8 @@ export class AskView extends LitElement {
             background-color: rgba(255,255,255,0.18);
         }
 
-        /* Shown when the request never produced a response. Without this the
-           window silently collapses back to the input and the user has no way
-           to tell a failure apart from an ignored keypress. */
+        /* Shown when the request produced no response; otherwise the window
+           collapses back to the input and a failure looks like an ignored keypress. */
         .error-message {
             display: flex;
             align-items: flex-start;
@@ -750,6 +750,7 @@ export class AskView extends LitElement {
         this.headerAnimating = false;
         this.isStreaming = false;
         this.reasoningChars = 0;
+        this.view = null;
         this.errorMessage = '';
 
         this.marked = null;
@@ -757,7 +758,6 @@ export class AskView extends LitElement {
         this.DOMPurify = null;
         this.isLibrariesLoaded = false;
 
-        // SMD.js streaming markdown parser
         this.smdParser = null;
         this.smdContainer = null;
         this.lastProcessedLength = 0;
@@ -773,7 +773,6 @@ export class AskView extends LitElement {
 
         this.loadLibraries();
 
-        // --- Resize helpers ---
         this.isThrottled = false;
     }
 
@@ -823,8 +822,7 @@ export class AskView extends LitElement {
             });
 
             window.api.askView.onAskStateUpdate((event, newState) => {
-                // A new request is starting - drop the previous failure so the
-                // banner never outlives the question it belongs to.
+                // A new request clears the previous request's error banner.
                 if (newState.isLoading) this.errorMessage = '';
 
                 this.currentResponse = newState.currentResponse;
@@ -832,6 +830,7 @@ export class AskView extends LitElement {
                 this.isLoading       = newState.isLoading;
                 this.isStreaming     = newState.isStreaming;
                 this.reasoningChars  = newState.reasoningChars || 0;
+                this.view            = newState.view || null;
 
                 const wasHidden = !this.showTextInput;
                 this.showTextInput = newState.showTextInput;
@@ -937,7 +936,6 @@ export class AskView extends LitElement {
     }
 
     handleCloseAskWindow() {
-        // this.clearResponseContent();
         window.api.askView.closeAskWindow();
     }
 
@@ -960,6 +958,7 @@ export class AskView extends LitElement {
         this.isLoading = false;
         this.isStreaming = false;
         this.reasoningChars = 0;
+        this.view = null;
         this.headerText = 'AI Response';
         this.showTextInput = true;
         this.errorMessage = '';
@@ -1023,7 +1022,7 @@ export class AskView extends LitElement {
     handleScroll(direction) {
         const scrollableElement = this.shadowRoot.querySelector('#responseContainer');
         if (scrollableElement) {
-            const scrollAmount = 100; // 한 번에 스크롤할 양 (px)
+            const scrollAmount = 100; // px per step
             if (direction === 'up') {
                 scrollableElement.scrollTop -= scrollAmount;
             } else {
@@ -1036,8 +1035,7 @@ export class AskView extends LitElement {
     renderContent() {
         const responseContainer = this.shadowRoot.getElementById('responseContainer');
         if (!responseContainer) return;
-    
-        // Check loading state
+
         if (this.isLoading) {
             responseContainer.innerHTML = `
               <div class="loading-dots">
@@ -1048,18 +1046,15 @@ export class AskView extends LitElement {
             this.resetStreamingParser();
             return;
         }
-        
-        // If there is no response, show empty state
+
         if (!this.currentResponse) {
             responseContainer.innerHTML = `<div class="empty-state">...</div>`;
             this.resetStreamingParser();
             return;
         }
-        
-        // Set streaming markdown parser
+
         this.renderStreamingMarkdown(responseContainer);
 
-        // After updating content, recalculate window height
         this.adjustWindowHeightThrottled();
     }
 
@@ -1067,37 +1062,39 @@ export class AskView extends LitElement {
         this.smdParser = null;
         this.smdContainer = null;
         this.lastProcessedLength = 0;
+        this.smdText = '';
     }
 
     renderStreamingMarkdown(responseContainer) {
         try {
-            // 파서가 없거나 컨테이너가 변경되었으면 새로 생성
-            if (!this.smdParser || this.smdContainer !== responseContainer) {
+            const currentText = this.currentResponse;
+            // The parser only appends. A text that does not continue the one
+            // rendered is another answer (stepped to with the history
+            // shortcuts, or shown again for a repeated question): start over.
+            const otherAnswer = !!this.smdParser && !currentText.startsWith(this.smdText || '');
+
+            const fresh = !this.smdParser || this.smdContainer !== responseContainer || otherAnswer;
+            if (fresh) {
                 this.smdContainer = responseContainer;
                 this.smdContainer.innerHTML = '';
-                
-                // smd.js의 default_renderer 사용
+
                 const renderer = default_renderer(this.smdContainer);
                 this.smdParser = parser(renderer);
                 this.lastProcessedLength = 0;
             }
 
-            // 새로운 텍스트만 처리 (스트리밍 최적화)
-            const currentText = this.currentResponse;
             const newText = currentText.slice(this.lastProcessedLength);
-            
+
             if (newText.length > 0) {
-                // 새로운 텍스트 청크를 파서에 전달
                 parser_write(this.smdParser, newText);
                 this.lastProcessedLength = currentText.length;
+                this.smdText = currentText;
             }
 
-            // 스트리밍이 완료되면 파서 종료
             if (!this.isStreaming && !this.isLoading) {
                 parser_end(this.smdParser);
             }
 
-            // 코드 하이라이팅 적용
             if (this.hljs) {
                 responseContainer.querySelectorAll('pre code').forEach(block => {
                     if (!block.hasAttribute('data-highlighted')) {
@@ -1107,12 +1104,11 @@ export class AskView extends LitElement {
                 });
             }
 
-            // 스크롤을 맨 아래로
-            responseContainer.scrollTop = responseContainer.scrollHeight;
+            // A finished answer shown whole is read from the top; a streaming one follows its end.
+            responseContainer.scrollTop = fresh && !this.isStreaming ? 0 : responseContainer.scrollHeight;
             
         } catch (error) {
             console.error('Error rendering streaming markdown:', error);
-            // 에러 발생 시 기본 텍스트 렌더링으로 폴백
             this.renderFallbackContent(responseContainer);
         }
     }
@@ -1122,10 +1118,8 @@ export class AskView extends LitElement {
         
         if (this.isLibrariesLoaded && this.marked && this.DOMPurify) {
             try {
-                // 마크다운 파싱
                 const parsedHtml = this.marked.parse(textToRender);
 
-                // DOMPurify로 정제
                 const cleanHtml = this.DOMPurify.sanitize(parsedHtml, {
                     ALLOWED_TAGS: [
                         'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'strong', 'b', 'em', 'i',
@@ -1137,7 +1131,6 @@ export class AskView extends LitElement {
 
                 responseContainer.innerHTML = cleanHtml;
 
-                // 코드 하이라이팅 적용
                 if (this.hljs) {
                     responseContainer.querySelectorAll('pre code').forEach(block => {
                         this.hljs.highlightElement(block);
@@ -1148,7 +1141,6 @@ export class AskView extends LitElement {
                 responseContainer.textContent = textToRender;
             }
         } else {
-            // 라이브러리가 로드되지 않았을 때 기본 렌더링
             const basicHtml = textToRender
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
@@ -1209,25 +1201,21 @@ export class AskView extends LitElement {
     fixIncompleteMarkdown(text) {
         if (!text) return text;
 
-        // 불완전한 볼드체 처리
         const boldCount = (text.match(/\*\*/g) || []).length;
         if (boldCount % 2 === 1) {
             text += '**';
         }
 
-        // 불완전한 이탤릭체 처리
         const italicCount = (text.match(/(?<!\*)\*(?!\*)/g) || []).length;
         if (italicCount % 2 === 1) {
             text += '*';
         }
 
-        // 불완전한 인라인 코드 처리
         const inlineCodeCount = (text.match(/`/g) || []).length;
         if (inlineCodeCount % 2 === 1) {
             text += '`';
         }
 
-        // 불완전한 링크 처리
         const openBrackets = (text.match(/\[/g) || []).length;
         const closeBrackets = (text.match(/\]/g) || []).length;
         if (openBrackets > closeBrackets) {
@@ -1291,21 +1279,18 @@ export class AskView extends LitElement {
             await navigator.clipboard.writeText(lineToCopy);
             console.log('Line copied to clipboard');
 
-            // '복사됨' 상태로 UI 즉시 업데이트
             this.lineCopyState = { ...this.lineCopyState, [lineIndex]: true };
-            this.requestUpdate(); // LitElement에 UI 업데이트 요청
+            this.requestUpdate();
 
-            // 기존 타임아웃이 있다면 초기화
             if (this.lineCopyTimeouts && this.lineCopyTimeouts[lineIndex]) {
                 clearTimeout(this.lineCopyTimeouts[lineIndex]);
             }
 
-            // ✨ 수정된 타임아웃: 1.5초 후 '복사됨' 상태 해제
             this.lineCopyTimeouts[lineIndex] = setTimeout(() => {
                 const updatedState = { ...this.lineCopyState };
                 delete updatedState[lineIndex];
                 this.lineCopyState = updatedState;
-                this.requestUpdate(); // UI 업데이트 요청
+                this.requestUpdate();
             }, 1500);
         } catch (err) {
             console.error('Failed to copy line:', err);
@@ -1315,7 +1300,7 @@ export class AskView extends LitElement {
     async handleSendText(e, overridingText = '') {
         const textInput = this.shadowRoot?.getElementById('textInput');
         const text = (overridingText || textInput?.value || '').trim();
-        // if (!text) return;
+        // Empty text is still sent: it asks about the screen alone.
 
         textInput.value = '';
 
@@ -1343,8 +1328,7 @@ export class AskView extends LitElement {
 
     updated(changedProperties) {
         super.updated(changedProperties);
-    
-        // ✨ isLoading 또는 currentResponse가 변경될 때마다 뷰를 다시 그립니다.
+
         if (changedProperties.has('isLoading') || changedProperties.has('currentResponse')) {
             this.renderContent();
         }
@@ -1371,19 +1355,25 @@ export class AskView extends LitElement {
 
 
 
+    /** "AI Response", or which earlier answer this is: shown again for a repeated question, or stepped to. */
+    answerLabel() {
+        if (!this.view) return 'AI Response';
+        const time = new Date(this.view.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return this.view.replay ? `↩ Answered ${time}` : `${this.view.number}/${this.view.count} · ${time}`;
+    }
+
     render() {
         const hasResponse = this.isLoading || this.currentResponse || this.isStreaming;
         // ~4 characters per token: a rough but steady progress signal while a
         // reasoning model thinks before its first answer word.
         const headerText = !this.isLoading
-            ? 'AI Response'
+            ? this.answerLabel()
             : this.reasoningChars > 0
               ? `Reasoning... ~${Math.round(this.reasoningChars / 4)} tokens`
               : 'Thinking...';
 
         return html`
             <div class="ask-container">
-                <!-- Response Header -->
                 <div class="response-header ${!hasResponse ? 'hidden' : ''}">
                     <div class="header-left">
                         <div class="response-icon">
@@ -1424,18 +1414,15 @@ export class AskView extends LitElement {
                     </div>
                 </div>
 
-                <!-- Response Container -->
                 <div class="response-container ${!hasResponse ? 'hidden' : ''}" id="responseContainer">
-                    <!-- Content is dynamically generated in updateResponseContent() -->
+                    <!-- Filled imperatively by renderContent(), not by Lit -->
                 </div>
 
-                <!-- Error Banner -->
                 <div class="error-message ${!this.errorMessage ? 'hidden' : ''}">
                     <span class="error-icon">⚠️</span>
                     <span>${this.errorMessage}</span>
                 </div>
 
-                <!-- Text Input Container -->
                 <div class="text-input-container ${!hasResponse ? 'no-response' : ''} ${!this.showTextInput ? 'hidden' : ''}">
                     <input
                         type="text"
@@ -1458,7 +1445,6 @@ export class AskView extends LitElement {
         `;
     }
 
-    // Dynamically resize the BrowserWindow to fit current content
     adjustWindowHeight() {
         if (!window.api) return;
 
@@ -1485,7 +1471,7 @@ export class AskView extends LitElement {
         }).catch(err => console.error('AskView adjustWindowHeight error:', err));
     }
 
-    // Throttled wrapper to avoid excessive IPC spam (executes at most once per animation frame)
+    // At most once per animation frame, to limit resize IPC.
     adjustWindowHeightThrottled() {
         if (this.isThrottled) return;
 

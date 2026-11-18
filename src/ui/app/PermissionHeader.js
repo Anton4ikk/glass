@@ -28,7 +28,7 @@ export class PermissionHeader extends LitElement {
         .container {
             -webkit-app-region: drag;
             width: 285px;
-            /* height is now set dynamically */
+            /* height is set dynamically */
             padding: 18px 20px;
             background: rgba(0, 0, 0, 0.3);
             border-radius: 16px;
@@ -235,8 +235,7 @@ export class PermissionHeader extends LitElement {
             background: rgba(255, 255, 255, 0.2);
             cursor: not-allowed;
         }
-        
-        /* ────────────────[ GLASS BYPASS ]─────────────── */
+
         :host-context(body.has-glass) .container,
         :host-context(body.has-glass) .action-button,
         :host-context(body.has-glass) .continue-button,
@@ -280,8 +279,7 @@ export class PermissionHeader extends LitElement {
         super.connectedCallback();
 
         await this.checkPermissions();
-        
-        // Set up periodic permission check
+
         this.permissionCheckInterval = setInterval(() => this.checkPermissions(), 1000);
     }
 
@@ -306,16 +304,14 @@ export class PermissionHeader extends LitElement {
             
             this.microphoneGranted = permissions.microphone;
             this.screenGranted = permissions.screen;
-            
-            // if permissions changed == UI update
+
             if (prevMic !== this.microphoneGranted || prevScreen !== this.screenGranted) {
                 console.log('[PermissionHeader] Permission status changed, updating UI');
                 this.requestUpdate();
             }
 
-            // if all permissions granted == automatically continue
-            if (this.microphoneGranted === 'granted' && 
-                this.screenGranted === 'granted' && 
+            if (this.microphoneGranted === 'granted' &&
+                this.screenGranted === 'granted' &&
                 this.continueCallback) {
                 console.log('[PermissionHeader] All permissions granted, proceeding automatically');
                 setTimeout(() => this.handleContinue(), 500);
@@ -350,10 +346,6 @@ export class PermissionHeader extends LitElement {
                     return;
                 }
               }
-            
-            
-            // Check permissions again after a delay
-            // setTimeout(() => this.checkPermissions(), 1000);
         } catch (error) {
             console.error('[PermissionHeader] Error requesting microphone permission:', error);
         }
@@ -377,10 +369,6 @@ export class PermissionHeader extends LitElement {
             console.log('[PermissionHeader] Opening screen recording preferences...');
             await window.api.permissionHeader.openSystemPreferences('screen-recording');
             }
-            
-            // Check permissions again after a delay
-            // (This may not execute if app restarts after permission grant)
-            // setTimeout(() => this.checkPermissions(), 2000);
         } catch (error) {
             console.error('[PermissionHeader] Error opening screen recording preferences:', error);
         }

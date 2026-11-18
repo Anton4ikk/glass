@@ -1,4 +1,4 @@
-import './MainHeader.js';
+import { MAIN_HEADER_SIZE } from './MainHeader.js';
 import './ApiKeyHeader.js';
 import './PermissionHeader.js';
 
@@ -27,7 +27,6 @@ class HeaderTransitionManager {
             this.mainHeader = null;
             this.permissionHeader = null;
 
-            // Create new header element
             if (type === 'apikey') {
                 this.apiKeyHeader = document.createElement('apikey-header');
                 this.apiKeyHeader.stateUpdateCallback = () => this.handleStateUpdate();
@@ -98,7 +97,6 @@ class HeaderTransitionManager {
                 this.transitionToPermissionHeader();
             }
         } else {
-            // No providers configured yet: ask for API keys / local models.
             await this.transitionToApiKeyHeader();
         }
     }
@@ -109,23 +107,19 @@ class HeaderTransitionManager {
     }
 
     async transitionToPermissionHeader() {
-        // Prevent duplicate transitions
         if (this.currentHeaderType === 'permission') {
             console.log('[HeaderController] Already showing permission setup, skipping transition');
             return;
         }
 
-        // Check if permissions were previously completed
         if (window.api) {
             try {
                 const permissionsCompleted = await window.api.headerController.checkPermissionsCompleted();
                 if (permissionsCompleted) {
                     console.log('[HeaderController] Permissions were previously completed, checking current status...');
                     
-                    // Double check current permission status
                     const permissionResult = await this.checkPermissions();
                     if (permissionResult.success) {
-                        // Skip permission setup if already granted
                         this.transitionToMainHeader();
                         return;
                     }
@@ -152,8 +146,9 @@ class HeaderTransitionManager {
 
     async _resizeForMain() {
         if (!window.api) return;
-        console.log('[HeaderController] _resizeForMain: Resizing window to 353x47');
-        return window.api.headerController.resizeHeaderWindow({ width: 353, height: 47 }).catch(() => {});
+        const { width, height } = MAIN_HEADER_SIZE;
+        console.log(`[HeaderController] _resizeForMain: Resizing window to ${width}x${height}`);
+        return window.api.headerController.resizeHeaderWindow({ width, height }).catch(() => {});
     }
 
     async _resizeForApiKey(height = 370) {

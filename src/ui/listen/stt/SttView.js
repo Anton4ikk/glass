@@ -7,8 +7,6 @@ export class SttView extends LitElement {
             width: 100%;
         }
 
-        /* Inherit font styles from parent */
-
         .transcription-container {
             overflow-y: auto;
             padding: 12px 12px 16px 12px;
@@ -21,8 +19,6 @@ export class SttView extends LitElement {
             z-index: 1;
             flex: 1;
         }
-
-        /* Visibility handled by parent component */
 
         .transcription-container::-webkit-scrollbar {
             width: 8px;
@@ -107,7 +103,6 @@ export class SttView extends LitElement {
         }
     }
 
-    // Handle session reset from parent
     resetTranscript() {
         this.sttMessages = [];
         this.requestUpdate();
@@ -167,8 +162,7 @@ export class SttView extends LitElement {
         }
 
         this.sttMessages = newMessages;
-        
-        // Notify parent component about message updates
+
         this.dispatchEvent(new CustomEvent('stt-messages-updated', {
             detail: { messages: this.sttMessages },
             bubbles: true

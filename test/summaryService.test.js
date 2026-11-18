@@ -3,6 +3,8 @@ const assert = require('node:assert/strict');
 
 const SummaryService = require('../src/features/listen/summary/summaryService');
 
+const { ANALYSIS_MIN_INTERVAL_MS } = SummaryService;
+
 const DEFAULT_ACTIONS = ['✨ What should I say next?', '💬 Suggest follow-up questions'];
 
 function parse(text, previousResult = null, language = null) {
@@ -172,7 +174,7 @@ describe('SummaryService live analysis scheduling', () => {
         t.mock.timers.tick(20);
         await first;
         // The follow-up waits for the minimum interval instead of starting right away.
-        t.mock.timers.tick(11000);
+        t.mock.timers.tick(ANALYSIS_MIN_INTERVAL_MS - 1000);
         assert.deepEqual(runs, [0]);
         t.mock.timers.tick(1000);
         t.mock.timers.tick(20);
@@ -187,18 +189,19 @@ describe('SummaryService live analysis scheduling', () => {
             runs.push(Date.now());
             service.lastAnalyzedCount = service.conversationHistory.length;
         };
-        // A turn every 2 s for 30 s.
-        for (let i = 0; i < 15; i++) {
+        // A turn every 2 s for 2.5 intervals.
+        const turns = Math.round((2.5 * ANALYSIS_MIN_INTERVAL_MS) / 2000);
+        for (let i = 0; i < turns; i++) {
             service.addConversationTurn('Them', `turn ${i}`);
             t.mock.timers.tick(2000);
             await Promise.resolve();
         }
-        t.mock.timers.tick(15000);
+        t.mock.timers.tick(ANALYSIS_MIN_INTERVAL_MS);
         await Promise.resolve();
         // Mocked Date reads the end of the tick in which the timer fired (1.5 s timer, 2 s ticks).
         assert.ok(runs[0] <= 2000, `the first turn is analyzed right away: ${JSON.stringify(runs)}`);
-        assert.ok(runs.length <= 4, `expected about one run per 12 s, got ${runs.length}`);
-        for (let i = 1; i < runs.length; i++) assert.ok(runs[i] - runs[i - 1] >= 12000);
+        assert.ok(runs.length <= 4, `expected about one run per interval, got ${runs.length}`);
+        for (let i = 1; i < runs.length; i++) assert.ok(runs[i] - runs[i - 1] >= ANALYSIS_MIN_INTERVAL_MS);
     });
 });
 
@@ -223,32 +226,43 @@ describe('SummaryService auto answer', () => {
         return asked;
     }
 
-    test('answers each new question once, newest first', () => {
+    test('answers each detected question once, even rephrased', () => {
         const service = new SummaryService();
         service.setSessionId('session-1');
         const asked = recordAsks(() => {
-            service.autoAnswerNewestQuestion({ questions: ['Как развернуть связный список?'] });
-            service.autoAnswerNewestQuestion({ questions: ['Как развернуть связный список?'] });
-            service.autoAnswerNewestQuestion({ questions: ['Какая сложность у Two Sum?', 'Как развернуть связный список?'] });
-            service.autoAnswerNewestQuestion({ questions: [] });
+            service.autoAnswerQuestion('Как развернуть связный список?');
+            service.autoAnswerQuestion('Как развернуть односвязный связный список?');
+            service.autoAnswerQuestion('Какая сложность у Two Sum?');
+            service.autoAnswerQuestion(null);
         });
         assert.deepEqual(asked, ['Как развернуть связный список?', 'Какая сложность у Two Sum?']);
     });
 
-    test('the task on screen is answered first, once, then spoken questions', () => {
+    test('the summary auto-answers only the task on screen, once; its open questions are left to the detector', () => {
         const service = new SummaryService();
         service.setSessionId('session-1');
-        const data = text => service.parseResponseText(text, null, 'ru');
-        const withTask = data('**Screen Task**\nLeetCode Two Sum, Python\n**Open Questions**\n1. Есть ли ошибка в коде?');
+        const withTask = service.parseResponseText('**Screen Task**\nLeetCode Two Sum, Python\n**Open Questions**\n1. Есть ли ошибка в коде?', null, 'ru');
         const asked = recordAsks(() => {
-            service.autoAnswerNewestQuestion(withTask);
-            service.autoAnswerNewestQuestion(withTask);
-            service.autoAnswerNewestQuestion(withTask);
+            service.autoAnswerScreenTask(withTask);
+            service.autoAnswerScreenTask(withTask);
         });
-        assert.deepEqual(asked, [
-            'Реши задачу на экране (LeetCode Two Sum, Python). Если на экране есть код, проверь его, найди и исправь ошибки.',
-            'Есть ли ошибка в коде?',
-        ]);
+        assert.deepEqual(asked, ['Реши задачу на экране (LeetCode Two Sum, Python). Если на экране есть код, проверь его, найди и исправь ошибки.']);
+    });
+
+    test('the task on screen does not cut off an answer in progress and is tried again later', () => {
+        const askService = require('../src/features/ask/askService');
+        const original = askService.isAnswering;
+        const service = new SummaryService();
+        service.setSessionId('session-1');
+        const task = service.parseResponseText('**Screen Task**\nTwo Sum', null, 'en');
+        try {
+            askService.isAnswering = () => true;
+            assert.deepEqual(recordAsks(() => service.autoAnswerScreenTask(task)), []);
+            askService.isAnswering = () => false;
+            assert.equal(recordAsks(() => service.autoAnswerScreenTask(task)).length, 1);
+        } finally {
+            askService.isAnswering = original;
+        }
     });
 
 
@@ -257,11 +271,11 @@ describe('SummaryService auto answer', () => {
         service.setSessionId('session-1');
         service.runAnalysis = async () => {};
         const asked = recordAsks(() => {
-            service.autoAnswerNewestQuestion({ questions: ['Как решить задачу?'] });
+            service.autoAnswerQuestion('Как решить задачу?');
             service.finalizeSession();
             service.resetConversationHistory();
-            // An analysis that was still running when Stop was pressed lands now.
-            service.autoAnswerNewestQuestion({ questions: ['Как решить задачу?'] });
+            // A detection that was still running when Stop was pressed lands now.
+            service.autoAnswerQuestion('Как решить задачу?');
         });
         assert.deepEqual(asked, ['Как решить задачу?']);
     });
@@ -284,11 +298,13 @@ describe('SummaryService auto answer vs the user', () => {
             const service = new SummaryService();
             service.setSessionId('session-1');
             askService.isAnsweringUser = () => true;
-            service.autoAnswerNewestQuestion({ questions: ['Какая сложность?'] });
+            service.autoAnswerQuestion('Какая сложность?');
             assert.deepEqual(asked, []);
 
+            // Kept, and asked once the user's answer is done.
             askService.isAnsweringUser = () => false;
-            service.autoAnswerNewestQuestion({ questions: ['Какая сложность?'] });
+            service.retryDeferredQuestion();
+            service.retryDeferredQuestion();
             assert.deepEqual(asked, [['Какая сложность?', 'auto']]);
         } finally {
             askService.sendMessage = original.send;

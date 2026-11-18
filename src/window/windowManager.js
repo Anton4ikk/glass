@@ -7,15 +7,14 @@ const shortcutsService = require('../features/shortcuts/shortcutsService');
 const internalBridge = require('../bridge/internalBridge');
 const { setStealthCursor, attachStealthCursor } = require('./stealthCursor');
 
-/* ────────────────[ GLASS BYPASS ]─────────────── */
 let liquidGlass;
 const isLiquidGlassSupported = () => {
     if (process.platform !== 'darwin') {
         return false;
     }
     const majorVersion = parseInt(os.release().split('.')[0], 10);
-    // return majorVersion >= 25; // macOS 26+ (Darwin 25+)
-    return majorVersion >= 26; // See you soon!
+    // macOS 26 is Darwin 25, so this keeps liquid glass off for now.
+    return majorVersion >= 26;
 };
 let shouldUseLiquidGlass = isLiquidGlassSupported();
 if (shouldUseLiquidGlass) {
@@ -26,7 +25,6 @@ if (shouldUseLiquidGlass) {
         shouldUseLiquidGlass = false;
     }
 }
-/* ────────────────[ GLASS BYPASS ]─────────────── */
 
 let isContentProtectionOn = true;
 let lastVisibleWindows = new Set(['header']);
@@ -42,8 +40,6 @@ let movementManager = null;
 
 
 function updateChildWindowLayouts(animated = true) {
-    // if (movementManager.isAnimating) return;
-
     const visibleWindows = {};
     const listenWin = windowPool.get('listen');
     const askWin = windowPool.get('ask');
@@ -109,7 +105,6 @@ function setupWindowController(windowPool, layoutManager, movementManager) {
         changeAllWindowsVisibility(windowPool, targetVisibility);
     });
     internalBridge.on('window:moveToDisplay', ({ displayId }) => {
-        // movementManager.moveToDisplay(displayId);
         const header = windowPool.get('header');
         if (header) {
             const newPosition = layoutManager.calculateNewPositionForDisplay(header, displayId);
@@ -250,7 +245,6 @@ function changeAllWindowsVisibility(windowPool, targetVisibility) {
   }
 
 /**
- * 
  * @param {Map<string, BrowserWindow>} windowPool
  * @param {WindowLayoutManager} layoutManager 
  * @param {SmoothMovementManager} movementManager
@@ -290,7 +284,6 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
 
     if (name === 'settings') {
         if (shouldBeVisible) {
-            // Cancel any pending hide operations
             if (settingsHideTimer) {
                 clearTimeout(settingsHideTimer);
                 settingsHideTimer = null;
@@ -306,7 +299,6 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
                 console.warn('[WindowManager] Could not calculate settings window position.');
             }
         } else {
-            // Hide after a delay
             if (settingsHideTimer) {
                 clearTimeout(settingsHideTimer);
             }
@@ -326,7 +318,6 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
 
     if (name === 'shortcut-settings') {
         if (shouldBeVisible) {
-            // layoutManager.positionShortcutSettingsWindow();
             const newBounds = layoutManager.calculateShortcutSettingsWindowPosition();
             if (newBounds) win.setBounds(newBounds);
             
@@ -335,7 +326,6 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
             } else {
                 win.setAlwaysOnTop(true);
             }
-            // globalShortcut.unregisterAll();
             disableClicks(win);
             win.show();
         } else {
@@ -397,8 +387,7 @@ async function handleWindowVisibilityRequest(windowPool, layoutManager, movement
 
             movementManager.fade(win, { to: 0, onComplete: () => win.hide() });
             movementManager.animateWindowPosition(win, targetPos);
-            
-            // 다른 창들도 새 레이아웃으로 애니메이션
+
             const otherWindowsLayout = { ...targetLayout };
             delete otherWindowsLayout[name];
             movementManager.animateLayout(otherWindowsLayout);
@@ -443,8 +432,6 @@ const toggleContentProtection = () => {
 
 
 function createFeatureWindows(header, namesToCreate) {
-    // if (windowPool.has('listen')) return;
-
     const commonChildOptions = {
         parent: header,
         show: false,
@@ -487,8 +474,6 @@ function createFeatureWindows(header, namesToCreate) {
                         const viewId = liquidGlass.addView(listen.getNativeWindowHandle());
                         if (viewId !== -1) {
                             liquidGlass.unstable_setVariant(viewId, liquidGlass.GlassMaterialVariant.bubbles);
-                            // liquidGlass.unstable_setScrim(viewId, 1);
-                            // liquidGlass.unstable_setSubdued(viewId, 1);
                         }
                     });
                 }
@@ -499,7 +484,6 @@ function createFeatureWindows(header, namesToCreate) {
                 break;
             }
 
-            // ask
             case 'ask': {
                 const ask = new BrowserWindow({ ...commonChildOptions, width:600 });
                 protectWindow(ask);
@@ -518,21 +502,21 @@ function createFeatureWindows(header, namesToCreate) {
                         const viewId = liquidGlass.addView(ask.getNativeWindowHandle());
                         if (viewId !== -1) {
                             liquidGlass.unstable_setVariant(viewId, liquidGlass.GlassMaterialVariant.bubbles);
-                            // liquidGlass.unstable_setScrim(viewId, 1);
-                            // liquidGlass.unstable_setSubdued(viewId, 1);
                         }
                     });
                 }
-                
-                // Open DevTools in development
+
                 if (!app.isPackaged && process.env.GLASS_DEVTOOLS === '1') {
                     ask.webContents.openDevTools({ mode: 'detach' });
                 }
+                // The previous/next answer shortcuts are registered only while Ask is on screen.
+                ask.on('show', () => internalBridge.emit('ask:visibilityChanged', { visible: true }));
+                ask.on('hide', () => internalBridge.emit('ask:visibilityChanged', { visible: false }));
+                ask.on('closed', () => internalBridge.emit('ask:visibilityChanged', { visible: false }));
                 windowPool.set('ask', ask);
                 break;
             }
 
-            // settings
             case 'settings': {
                 const settings = new BrowserWindow({ ...commonChildOptions, width:240, maxHeight:400, parent:undefined });
                 protectWindow(settings);
@@ -553,8 +537,6 @@ function createFeatureWindows(header, namesToCreate) {
                         const viewId = liquidGlass.addView(settings.getNativeWindowHandle());
                         if (viewId !== -1) {
                             liquidGlass.unstable_setVariant(viewId, liquidGlass.GlassMaterialVariant.bubbles);
-                            // liquidGlass.unstable_setScrim(viewId, 1);
-                            // liquidGlass.unstable_setSubdued(viewId, 1);
                         }
                     });
                 }
@@ -681,10 +663,8 @@ function createWindows() {
             backgroundThrottling: false,
             webSecurity: false,
             enableRemoteModule: false,
-            // Ensure proper rendering and prevent pixelation
             experimentalFeatures: false,
         },
-        // Prevent pixelation and ensure proper rendering
         useContentSize: true,
         disableAutoHideCursor: true,
     });
@@ -705,8 +685,6 @@ function createWindows() {
             const viewId = liquidGlass.addView(header.getNativeWindowHandle());
             if (viewId !== -1) {
                 liquidGlass.unstable_setVariant(viewId, liquidGlass.GlassMaterialVariant.bubbles);
-                // liquidGlass.unstable_setScrim(viewId, 1); 
-                // liquidGlass.unstable_setSubdued(viewId, 1);
             }
         });
     }
@@ -734,7 +712,6 @@ function createWindows() {
         createFeatureWindows(header, ['listen', 'ask', 'settings', 'shortcut-settings']);
     }
 
-    // Open DevTools in development
     if (!app.isPackaged && process.env.GLASS_DEVTOOLS === '1') {
         header.webContents.openDevTools({ mode: 'detach' });
     }
@@ -775,7 +752,7 @@ function setupIpcHandlers(windowPool, layoutManager) {
             const primaryDisplay = screen.getPrimaryDisplay();
             const newPosition = layoutManager.calculateNewPositionForDisplay(header, primaryDisplay.id);
             if (newPosition) {
-                // 복구 상황이므로 애니메이션 없이 즉시 이동
+                // Recovering from a lost display: jump without animating.
                 header.setPosition(newPosition.x, newPosition.y, false);
                 updateChildWindowLayouts(false);
             }
@@ -783,7 +760,6 @@ function setupIpcHandlers(windowPool, layoutManager) {
     });
 
     screen.on('display-metrics-changed', (event, display, changedMetrics) => {
-        // 레이아웃 업데이트 함수를 새 버전으로 호출
         updateChildWindowLayouts(false);
     });
 }

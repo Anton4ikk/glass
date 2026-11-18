@@ -69,7 +69,6 @@ export class ShortcutSettingsView extends LitElement {
         .settings-button.danger:hover{background:rgba(255,59,48,.15);
         }
 
-        /* ────────────────[ GLASS BYPASS ]─────────────── */
         :host-context(body.has-glass) {
           animation: none !important;
           transition: none !important;
@@ -77,7 +76,7 @@ export class ShortcutSettingsView extends LitElement {
           will-change: auto !important;
         }
         :host-context(body.has-glass) * {
-          background: transparent !important;   /* 요청한 투명 처리 */
+          background: transparent !important;
           filter: none !important;
           backdrop-filter: none !important;
           box-shadow: none !important;
@@ -124,21 +123,20 @@ export class ShortcutSettingsView extends LitElement {
     handleKeydown(e, shortcutKey){
         e.preventDefault(); e.stopPropagation();
         const result = this._parseAccelerator(e);
-        if(!result) return;          // modifier키만 누른 상태
+        if(!result) return;
     
         const {accel, error} = result;
         if(error){
           this.feedback = {...this.feedback, [shortcutKey]:{type:'error',msg:error}};
           return;
         }
-        // 성공
         this.shortcuts = {...this.shortcuts, [shortcutKey]:accel};
         this.feedback = {...this.feedback, [shortcutKey]:{type:'success',msg:'Shortcut set'}};
         this.stopCapture();
       }
     
       _parseAccelerator(e){
-        /* returns {accel?, error?} */
+        /* returns null while only a modifier is held, else {accel} or {error} */
         const parts=[]; if(e.metaKey) parts.push('Cmd');
         if(e.ctrlKey) parts.push('Ctrl');
         if(e.altKey) parts.push('Alt');
@@ -150,8 +148,7 @@ export class ShortcutSettingsView extends LitElement {
         const map={ArrowUp:'Up',ArrowDown:'Down',ArrowLeft:'Left',ArrowRight:'Right',' ':'Space'};
         parts.push(e.key.length===1? e.key.toUpperCase() : (map[e.key]||e.key));
         const accel=parts.join('+');
-    
-        /* ---- validation ---- */
+
         if(parts.length===1)   return {error:'Invalid shortcut: needs a modifier'};
         if(parts.length>4)     return {error:'Invalid shortcut: max 4 keys'};
         if(commonSystemShortcuts.has(accel)) return {error:'Invalid shortcut: system reserved'};
@@ -161,7 +158,7 @@ export class ShortcutSettingsView extends LitElement {
     startCapture(key){ this.capturingKey = key; this.feedback = {...this.feedback, [key]:undefined}; }
 
     disableShortcut(key){
-        this.shortcuts = {...this.shortcuts, [key]:''};         // 공백 => 작동 X
+        this.shortcuts = {...this.shortcuts, [key]:''};         // empty accelerator = unbound
         this.feedback   = {...this.feedback, [key]:{type:'success',msg:'Shortcut disabled'}};
       }
 
@@ -219,8 +216,7 @@ export class ShortcutSettingsView extends LitElement {
                 <div>
                   <div class="shortcut-entry">
                     <span class="shortcut-name">${this.formatShortcutName(key)}</span>
-    
-                    <!-- Edit & Disable 버튼 -->
+
                     <button class="action-btn" @click=${()=>this.startCapture(key)}>Edit</button>
                     <button class="action-btn" @click=${()=>this.disableShortcut(key)}>Disable</button>
     

@@ -1,5 +1,40 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 
+const MOD = navigator.platform.toUpperCase().includes('MAC') ? 'Cmd' : 'Ctrl';
+
+// Shortcuts listed in the card under the bar (Ask shows its own on the button).
+// manualScreenshot is left out: it's configurable but nothing handles it
+// (see shortcutsService.registerShortcuts).
+// Snap left/right are hardcoded in shortcutsService, not configurable.
+const LISTED_SHORTCUTS = [
+    { action: 'toggleVisibility', label: 'Show / Hide' },
+    { action: 'toggleClickThrough', label: 'Click-through' },
+    { action: 'moveUp', label: 'Move up' },
+    { action: 'moveDown', label: 'Move down' },
+    { action: 'moveLeft', label: 'Move left' },
+    { action: 'moveRight', label: 'Move right' },
+    { label: 'Snap left', accelerator: `${MOD}+Shift+Left` },
+    { label: 'Snap right', accelerator: `${MOD}+Shift+Right` },
+    { action: 'scrollUp', label: 'Scroll up' },
+    { action: 'scrollDown', label: 'Scroll down' },
+    { action: 'previousResponse', label: 'Previous answer' },
+    { action: 'nextResponse', label: 'Next answer' },
+];
+
+// The card has a fixed size so the header window can be sized before the
+// shortcuts arrive. Keep in sync with the .shortcut-list CSS below.
+const BAR_HEIGHT = 47; // windowLayoutManager HEADER_BAR_HEIGHT
+const LIST_GAP = 4;
+const LIST_PADDING_Y = 7;
+const LIST_ROW_HEIGHT = 18;
+const LIST_ROW_GAP = 3;
+const LIST_ROWS = Math.ceil(LISTED_SHORTCUTS.length / 2);
+const LIST_HEIGHT = LIST_PADDING_Y * 2 + LIST_ROWS * LIST_ROW_HEIGHT + (LIST_ROWS - 1) * LIST_ROW_GAP;
+// The bar alone is narrower than two columns of shortcuts, so both take this width.
+const PANEL_WIDTH = 349;
+
+export const MAIN_HEADER_SIZE = { width: 353, height: BAR_HEIGHT + LIST_GAP + LIST_HEIGHT };
+
 export class MainHeader extends LitElement {
     static properties = {
         isTogglingSession: { type: Boolean, state: true },
@@ -38,16 +73,22 @@ export class MainHeader extends LitElement {
             user-select: none;
         }
 
+        .panel {
+            display: inline-flex;
+            flex-direction: column;
+            gap: ${LIST_GAP}px;
+            width: ${PANEL_WIDTH}px;
+        }
+
         .header {
             -webkit-app-region: drag;
-            width: max-content;
-            height: 47px;
+            width: 100%;
+            height: ${BAR_HEIGHT}px;
             padding: 2px 10px 2px 13px;
             background: transparent;
             overflow: hidden;
             border-radius: 9000px;
-            /* backdrop-filter: blur(1px); */
-            justify-content: space-between;
+            justify-content: flex-start;
             align-items: center;
             display: inline-flex;
             box-sizing: border-box;
@@ -222,7 +263,7 @@ export class MainHeader extends LitElement {
             color: white;
             font-size: 12px;
             font-family: 'Helvetica Neue', sans-serif;
-            font-weight: 500; /* Medium */
+            font-weight: 500;
             word-wrap: break-word;
         }
 
@@ -233,8 +274,7 @@ export class MainHeader extends LitElement {
             display: flex;
         }
 
-        .icon-container.ask-icons svg,
-        .icon-container.showhide-icons svg {
+        .icon-container.ask-icons svg {
             width: 12px;
             height: 12px;
         }
@@ -262,6 +302,7 @@ export class MainHeader extends LitElement {
 
         .settings-button {
             -webkit-app-region: no-drag;
+            margin-left: auto;
             padding: 5px;
             border-radius: 50%;
             background: transparent;
@@ -289,7 +330,86 @@ export class MainHeader extends LitElement {
             width: 16px;
             height: 16px;
         }
-        /* ────────────────[ GLASS BYPASS ]─────────────── */
+        .shortcut-list {
+            -webkit-app-region: drag;
+            position: relative;
+            box-sizing: border-box;
+            height: ${LIST_HEIGHT}px;
+            padding: ${LIST_PADDING_Y}px 12px ${LIST_PADDING_Y}px 14px;
+            border-radius: 12px;
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-auto-rows: ${LIST_ROW_HEIGHT}px;
+            row-gap: ${LIST_ROW_GAP}px;
+            column-gap: 16px;
+        }
+
+        .shortcut-list::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0, 0, 0, 0.6);
+            border-radius: 12px;
+            z-index: -1;
+        }
+
+        .shortcut-list::after {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            border-radius: 12px;
+            padding: 1px;
+            background: linear-gradient(169deg, rgba(255, 255, 255, 0.17) 0%, rgba(255, 255, 255, 0.08) 50%, rgba(255, 255, 255, 0.17) 100%);
+            -webkit-mask:
+                linear-gradient(#fff 0 0) content-box,
+                linear-gradient(#fff 0 0);
+            -webkit-mask-composite: destination-out;
+            mask-composite: exclude;
+            pointer-events: none;
+        }
+
+        .shortcut-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 6px;
+            min-width: 0;
+        }
+
+        .shortcut-label {
+            color: rgba(255, 255, 255, 0.75);
+            font-size: 11px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .shortcut-keys {
+            display: flex;
+            gap: 3px;
+            flex-shrink: 0;
+        }
+
+        .key-box {
+            color: white;
+            font-size: 10px;
+            font-weight: 500;
+            background-color: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            min-width: 16px;
+            height: 16px;
+            padding: 0 2px;
+            box-sizing: border-box;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .shortcut-unset {
+            color: rgba(255, 255, 255, 0.4);
+            font-size: 11px;
+        }
+
         :host-context(body.has-glass) .header,
         :host-context(body.has-glass) .listen-button,
         :host-context(body.has-glass) .header-actions,
@@ -299,7 +419,11 @@ export class MainHeader extends LitElement {
             box-shadow: none !important;
             backdrop-filter: none !important;
         }
-        :host-context(body.has-glass) .icon-box {
+        :host-context(body.has-glass) .shortcut-list {
+            background: transparent !important;
+        }
+        :host-context(body.has-glass) .icon-box,
+        :host-context(body.has-glass) .key-box {
             background: transparent !important;
             border: none !important;
         }
@@ -307,7 +431,9 @@ export class MainHeader extends LitElement {
         :host-context(body.has-glass) .header::before,
         :host-context(body.has-glass) .header::after,
         :host-context(body.has-glass) .listen-button::before,
-        :host-context(body.has-glass) .listen-button::after {
+        :host-context(body.has-glass) .listen-button::after,
+        :host-context(body.has-glass) .shortcut-list::before,
+        :host-context(body.has-glass) .shortcut-list::after {
             display: none !important;
         }
 
@@ -483,7 +609,7 @@ export class MainHeader extends LitElement {
                 } else {
                     this.listenSessionStatus = 'beforeSession';
                 }
-                this.isTogglingSession = false; // ✨ 로딩 상태만 해제
+                this.isTogglingSession = false;
             };
             window.api.mainHeader.onListenChangeSessionResult(this._sessionStateTextListener);
 
@@ -562,20 +688,9 @@ export class MainHeader extends LitElement {
         }
     }
 
-    async _handleToggleAllWindowsVisibility() {
-        if (this.wasJustDragged) return;
-
-        try {
-            if (window.api) {
-                await window.api.mainHeader.sendToggleAllWindowsVisibility();
-            }
-        } catch (error) {
-            console.error('IPC invoke for all windows visibility button failed:', error);
-        }
-    }
 
 
-    renderShortcut(accelerator) {
+    renderShortcut(accelerator, boxClass = 'icon-box') {
         if (!accelerator) return html``;
 
         const keyMap = {
@@ -594,8 +709,28 @@ export class MainHeader extends LitElement {
 
         const keys = accelerator.split('+');
         return html`${keys.map(key => html`
-            <div class="icon-box">${keyMap[key] || key}</div>
+            <div class="${boxClass}">${keyMap[key] || key}</div>
         `)}`;
+    }
+
+    renderShortcutList() {
+        return html`
+            <div class="shortcut-list" @mousedown=${this.handleMouseDown}>
+                ${LISTED_SHORTCUTS.map(({ action, label, accelerator }) => {
+                    const keys = accelerator || this.shortcuts[action];
+                    return html`
+                        <div class="shortcut-row">
+                            <span class="shortcut-label">${label}</span>
+                            <span class="shortcut-keys">
+                                ${keys
+                                    ? this.renderShortcut(keys, 'key-box')
+                                    : html`<span class="shortcut-unset">—</span>`}
+                            </span>
+                        </div>
+                    `;
+                })}
+            </div>
+        `;
     }
 
     render() {
@@ -608,6 +743,7 @@ export class MainHeader extends LitElement {
         const showStopIcon = listenButtonText === 'Stop' || listenButtonText === 'Done';
 
         return html`
+            <div class="panel">
             <div class="header" @mousedown=${this.handleMouseDown}>
                 <button 
                     class="listen-button ${Object.keys(buttonClasses).filter(k => buttonClasses[k]).join(' ')}"
@@ -651,15 +787,6 @@ export class MainHeader extends LitElement {
                     </div>
                 </div>
 
-                <div class="header-actions" @click=${() => this._handleToggleAllWindowsVisibility()}>
-                    <div class="action-text">
-                        <div class="action-text-content">Show/Hide</div>
-                    </div>
-                    <div class="icon-container">
-                        ${this.renderShortcut(this.shortcuts.toggleVisibility)}
-                    </div>
-                </div>
-
                 <button 
                     class="settings-button"
                     @mouseenter=${(e) => this.showSettingsWindow(e.currentTarget)}
@@ -671,6 +798,8 @@ export class MainHeader extends LitElement {
                         </svg>
                     </div>
                 </button>
+            </div>
+            ${this.renderShortcutList()}
             </div>
         `;
     }

@@ -2,7 +2,6 @@ const crypto = require('crypto');
 
 function ipcRequest(req, channel, payload) {
     return new Promise((resolve, reject) => {
-        // Immediately check bridge status and fail if it's not available.
         if (!req.bridge || typeof req.bridge.emit !== 'function') {
             reject(new Error('IPC bridge is not available'));
             return;

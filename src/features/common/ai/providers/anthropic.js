@@ -35,20 +35,12 @@ class AnthropicProvider {
 }
 
 /**
- * Creates an Anthropic STT session
- * Note: Anthropic doesn't have native real-time STT, so this is a placeholder
- * You might want to use a different STT service or implement a workaround
- * @param {object} opts - Configuration options
- * @param {string} opts.apiKey - Anthropic API key
- * @param {string} [opts.language='en'] - Language code
- * @param {object} [opts.callbacks] - Event callbacks
+ * Anthropic has no real-time STT; this returns a no-op session.
  * @returns {Promise<object>} STT session placeholder
  */
 async function createSTT({ apiKey, language = "en", callbacks = {}, ...config }) {
   console.warn("[Anthropic] STT not natively supported. Consider using OpenAI or Gemini for STT.")
 
-  // Return a mock STT session that doesn't actually do anything
-  // You might want to fallback to another provider for STT
   return {
     sendRealtimeInput: async (audioData) => {
       console.warn("[Anthropic] STT sendRealtimeInput called but not implemented")
@@ -130,7 +122,6 @@ function createLLM({ apiKey, model = "claude-3-5-sonnet-20241022", temperature =
         if (msg.role === "system") {
           systemPrompt = msg.content
         } else {
-          // Handle multimodal content
           let content
           if (Array.isArray(msg.content)) {
             content = []
@@ -140,11 +131,9 @@ function createLLM({ apiKey, model = "claude-3-5-sonnet-20241022", temperature =
               } else if (part.type === "text") {
                 content.push({ type: "text", text: part.text })
               } else if (part.type === "image_url" && part.image_url) {
-                // Convert base64 image to Anthropic format
                 const imageUrl = part.image_url.url
                 const [mimeInfo, base64Data] = imageUrl.split(",")
 
-                // Extract the actual MIME type from the data URL
                 const mimeType = mimeInfo.match(/data:([^;]+)/)?.[1] || "image/jpeg"
 
                 content.push({
@@ -213,7 +202,6 @@ function createStreamingLLM({
         if (msg.role === "system") {
           systemPrompt = msg.content
         } else {
-          // Handle multimodal content
           let content
           if (Array.isArray(msg.content)) {
             content = []
@@ -223,11 +211,9 @@ function createStreamingLLM({
               } else if (part.type === "text") {
                 content.push({ type: "text", text: part.text })
               } else if (part.type === "image_url" && part.image_url) {
-                // Convert base64 image to Anthropic format
                 const imageUrl = part.image_url.url
                 const [mimeInfo, base64Data] = imageUrl.split(",")
 
-                // Extract the actual MIME type from the data URL
                 const mimeType = mimeInfo.match(/data:([^;]+)/)?.[1] || "image/jpeg"
 
                 console.log(`[Anthropic] Processing image with MIME type: ${mimeType}`)
@@ -253,7 +239,7 @@ function createStreamingLLM({
         }
       }
 
-      // Create a ReadableStream to handle Anthropic's streaming
+      // Re-emit Anthropic's stream as OpenAI-style SSE, which the callers parse.
       const stream = new ReadableStream({
         async start(controller) {
           try {
@@ -262,7 +248,6 @@ function createStreamingLLM({
             let chunkCount = 0
             let totalContent = ""
 
-            // Stream the response
             const stream = await client.messages.create({
               model: model,
               max_tokens: maxTokens,
@@ -278,7 +263,6 @@ function createStreamingLLM({
                 const chunkText = chunk.delta.text || ""
                 totalContent += chunkText
 
-                // Format as SSE data
                 const data = JSON.stringify({
                   choices: [
                     {
@@ -296,7 +280,6 @@ function createStreamingLLM({
               `[Anthropic Provider] Streamed ${chunkCount} chunks, total length: ${totalContent.length} chars`,
             )
 
-            // Send the final done message
             controller.enqueue(new TextEncoder().encode("data: [DONE]\n\n"))
             controller.close()
             console.log("[Anthropic Provider] Streaming completed successfully")
@@ -307,7 +290,6 @@ function createStreamingLLM({
         },
       })
 
-      // Create a Response object with the stream
       return new Response(stream, {
         headers: {
           "Content-Type": "text/event-stream",

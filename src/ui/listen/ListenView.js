@@ -40,7 +40,6 @@ export class ListenView extends LitElement {
     cursor: text !important;
 }
 
-/* highlight.js 스타일 추가 */
 .insights-container pre {
     background: rgba(0, 0, 0, 0.4) !important;
     border-radius: 8px !important;
@@ -288,8 +287,7 @@ export class ListenView extends LitElement {
             font-size: 10px;
             color: rgba(255, 255, 255, 0.7);
         }
-        
-        /* ────────────────[ GLASS BYPASS ]─────────────── */
+
         :host-context(body.has-glass) .assistant-container,
         :host-context(body.has-glass) .top-bar,
         :host-context(body.has-glass) .toggle-button,
@@ -351,7 +349,7 @@ export class ListenView extends LitElement {
         :host-context(body.has-glass) ::-webkit-scrollbar-track,
         :host-context(body.has-glass) ::-webkit-scrollbar-thumb {
             background: transparent !important;
-            width: 0 !important;      /* 스크롤바 자체 숨기기 */
+            width: 0 !important;
         }
         :host-context(body.has-glass) .assistant-container,
         :host-context(body.has-glass) .top-bar,
@@ -449,7 +447,6 @@ export class ListenView extends LitElement {
 
     connectedCallback() {
         super.connectedCallback();
-        // Only start timer if session is active
         if (this.isSessionActive) {
             this.startTimer();
         }
@@ -461,7 +458,6 @@ export class ListenView extends LitElement {
                 if (!wasActive && isActive) {
                     this.hasCompletedRecording = false;
                     this.startTimer();
-                    // Reset child components
                     this.updateComplete.then(() => {
                         const sttView = this.shadowRoot.querySelector('stt-view');
                         const summaryView = this.shadowRoot.querySelector('summary-view');
@@ -614,7 +610,6 @@ export class ListenView extends LitElement {
     }
 
     handleSttMessagesUpdated(event) {
-        // Handle messages update from SttView if needed
         this.adjustWindowHeightThrottled();
     }
 

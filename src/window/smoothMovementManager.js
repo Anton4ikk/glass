@@ -21,7 +21,6 @@ class SmoothMovementManager {
      */
     _isWindowValid(win) {
         if (!win || win.isDestroyed()) {
-            // 해당 창의 타이머가 있으면 정리
             if (this.animationTimers.has(win)) {
                 clearTimeout(this.animationTimers.get(win));
                 this.animationTimers.delete(win);
@@ -32,7 +31,6 @@ class SmoothMovementManager {
     }
 
     /**
-     * 
      * @param {BrowserWindow} win
      * @param {number} targetX
      * @param {number} targetY

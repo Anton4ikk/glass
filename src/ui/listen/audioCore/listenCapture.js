@@ -31,9 +31,6 @@ let systemAudioProcessor = null;
 // Latest system audio chunk, the echo reference for the microphone.
 let latestSystemAudio = null;
 
-// ---------------------------------------------------------------------------
-// Echo cancellation (WASM)
-// ---------------------------------------------------------------------------
 let aecPromise = null;
 
 /** Loads the WASM canceller once. Resolves to null if it can't load: capture then runs without AEC. */
@@ -88,9 +85,6 @@ function runAec(aec, micF32, sysF32) {
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// PCM helpers
-// ---------------------------------------------------------------------------
 function base64ToFloat32Array(base64) {
     const binary = atob(base64);
     const bytes = new Uint8Array(binary.length);
@@ -143,9 +137,6 @@ window.api.listenCapture.onSystemAudioData((event, { data }) => {
     latestSystemAudio = { data, timestamp: Date.now() };
 });
 
-// ---------------------------------------------------------------------------
-// Audio graphs
-// ---------------------------------------------------------------------------
 async function setupMicProcessing(micStream) {
     const aec = await getAec();
 

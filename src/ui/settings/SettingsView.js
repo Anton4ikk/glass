@@ -1,5 +1,4 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
-// import { getOllamaProgressTracker } from '../../features/common/services/localProgressTracker.js'; // 제거됨
 
 // Mirrors MAX_ABOUT_ME_LENGTH in features/common/prompts/aboutMe.js.
 const ABOUT_ME_MAX_LENGTH = 4000;
@@ -155,7 +154,6 @@ export class SettingsView extends LitElement {
             color: rgba(255, 255, 255, 0.9);
         }
 
-        /* Buttons Section */
         /* Actions come first, right under the header's own divider. */
         .buttons-section.actions-section {
             flex: none;
@@ -245,7 +243,6 @@ export class SettingsView extends LitElement {
             color: rgba(255, 255, 255, 0.4);
         }
 
-        /* About Me sub-page */
         .about-me-section {
             display: flex;
             flex-direction: column;
@@ -495,8 +492,7 @@ export class SettingsView extends LitElement {
             background: rgba(0, 122, 255, 0.8);
             transition: width 0.3s ease;
         }
-        
-        /* Dropdown styles */
+
         select.model-dropdown {
             background: rgba(0,0,0,0.2);
             color: white;
@@ -511,8 +507,7 @@ export class SettingsView extends LitElement {
         select.model-dropdown option:disabled {
             color: rgba(255,255,255,0.4);
         }
-            
-        /* ────────────────[ GLASS BYPASS ]─────────────── */
+
         :host-context(body.has-glass) {
             animation: none !important;
             transition: none !important;
@@ -537,8 +532,6 @@ export class SettingsView extends LitElement {
         }
     `;
 
-
-    //////// after_modelStateService ////////
     static properties = {
         shortcuts: { type: Object, state: true },
         isLoading: { type: Boolean, state: true },
@@ -557,22 +550,18 @@ export class SettingsView extends LitElement {
         aboutMeDraft: { type: String, state: true },
         aboutMeSaving: { type: Boolean, state: true },
         aboutMeStatus: { type: String, state: true },
-        // Ollama related properties
         ollamaStatus: { type: Object, state: true },
         ollamaModels: { type: Array, state: true },
         installingModels: { type: Object, state: true },
-        // Whisper related properties
         whisperModels: { type: Array, state: true },
         sttLanguage: { type: String, state: true },
         askThinking: { type: Boolean, state: true },
         // null = main list; 'aboutMe' / 'apiKeys' / 'shortcuts' = that sub-page.
         activeSection: { type: String, state: true },
     };
-    //////// after_modelStateService ////////
 
     constructor() {
         super();
-        //////// after_modelStateService ////////
         this.shortcuts = {};
         this.apiKeys = { openai: '', gemini: '', anthropic: '', whisper: '' };
         this.providerConfig = {};
@@ -589,31 +578,25 @@ export class SettingsView extends LitElement {
         this.aboutMeDraft = '';
         this.aboutMeSaving = false;
         this.aboutMeStatus = '';
-        // Ollama related
         this.ollamaStatus = { installed: false, running: false };
         this.ollamaModels = [];
         this.installingModels = {}; // { modelName: progress }
-        // Whisper related
         this.whisperModels = [];
         this.sttLanguage = 'en';
         this.askThinking = false;
         this.activeSection = null;
-        this.whisperProgressTracker = null; // Will be initialized when needed
-        this.handleUsePicklesKey = this.handleUsePicklesKey.bind(this)
+        this.whisperProgressTracker = null;
         this.loadInitialData();
-        //////// after_modelStateService ////////
     }
 
     async loadLocalAIStatus() {
         try {
-            // Load Ollama status
             const ollamaStatus = await window.api.settingsView.getOllamaStatus();
             if (ollamaStatus?.success) {
                 this.ollamaStatus = { installed: ollamaStatus.installed, running: ollamaStatus.running };
                 this.ollamaModels = ollamaStatus.models || [];
             }
-            
-            // Load Whisper models status only if Whisper is enabled
+
             if (this.apiKeys?.whisper === 'local') {
                 const whisperModelsResult = await window.api.settingsView.getWhisperInstalledModels();
                 if (whisperModelsResult?.success) {
@@ -628,22 +611,19 @@ export class SettingsView extends LitElement {
                     }
                 }
             }
-            
-            // Trigger UI update
+
             this.requestUpdate();
         } catch (error) {
             console.error('Error loading LocalAI status:', error);
         }
     }
 
-    //////// after_modelStateService ////////
     async loadInitialData() {
         if (!window.api) return;
         this.isLoading = true;
         try {
-            // Load essential data first
             const [modelSettings, contentProtection, shortcuts, sttLanguage, askThinking, aboutMe] = await Promise.all([
-                window.api.settingsView.getModelSettings(), // Facade call
+                window.api.settingsView.getModelSettings(),
                 window.api.settingsView.getContentProtectionStatus(),
                 window.api.settingsView.getCurrentShortcuts(),
                 window.api.settingsView.getSttLanguage(),
@@ -670,7 +650,7 @@ export class SettingsView extends LitElement {
             this.isContentProtectionOn = contentProtection;
             this.shortcuts = shortcuts || {};
             
-            // Load LocalAI status asynchronously to improve initial load time
+            // Not awaited, so local AI status doesn't delay the initial load.
             this.loadLocalAIStatus();
         } catch (error) {
             console.error('Error loading initial settings data:', error);
@@ -681,19 +661,16 @@ export class SettingsView extends LitElement {
 
 
     async handleSaveKey(provider) {
-        // For Ollama, we need to ensure it's ready first
         if (provider === 'ollama') {
             this.saving = true;
-            
-            // First ensure Ollama is installed and running
+
             const ensureResult = await window.api.settingsView.ensureOllamaReady();
             if (!ensureResult.success) {
                 alert(`Failed to setup Ollama: ${ensureResult.error}`);
                 this.saving = false;
                 return;
             }
-            
-            // Now validate (which will check if service is running)
+
             const result = await window.api.settingsView.validateKey({ provider, key: 'local' });
             
             if (result.success) {
@@ -705,8 +682,7 @@ export class SettingsView extends LitElement {
             this.saving = false;
             return;
         }
-        
-        // For Whisper, just enable it
+
         if (provider === 'whisper') {
             this.saving = true;
             const result = await window.api.settingsView.validateKey({ provider, key: 'local' });
@@ -720,8 +696,7 @@ export class SettingsView extends LitElement {
             return;
         }
         
-        // For other providers, use the normal flow. Only these have a key
-        // input; Ollama and Whisper are local and handled above.
+        // Only key-based providers have a key input; the local ones return above.
         const input = this.shadowRoot.querySelector(`#key-input-${provider}`);
         if (!input) return;
         const key = input.value;
@@ -776,7 +751,6 @@ export class SettingsView extends LitElement {
             this.saving = false;
         }
 
-        // 데이터 새로고침 후, 목록의 표시 상태를 토글합니다.
         this[visibilityProp] = !this[visibilityProp];
         this.requestUpdate();
     }
@@ -820,18 +794,15 @@ export class SettingsView extends LitElement {
     }
 
     async selectModel(type, modelId) {
-        // Check if this is an Ollama model that needs to be installed
         const provider = this.getProviderForModel(type, modelId);
         if (provider === 'ollama') {
             const ollamaModel = this.ollamaModels.find(m => m.name === modelId);
             if (ollamaModel && !ollamaModel.installed && !ollamaModel.installing) {
-                // Need to install the model first
                 await this.installOllamaModel(modelId);
                 return;
             }
         }
-        
-        // Check if this is a Whisper model that needs to be downloaded
+
         if (provider === 'whisper' && type === 'stt') {
             const isInstalling = this.installingModels[modelId] !== undefined;
             const whisperModelInfo = this.providerConfig.whisper.sttModels.find(m => m.id === modelId);
@@ -862,11 +833,9 @@ export class SettingsView extends LitElement {
     
     async installOllamaModel(modelName) {
         try {
-            // Ollama 모델 다운로드 시작
             this.installingModels = { ...this.installingModels, [modelName]: 0 };
             this.requestUpdate();
 
-            // 진행률 이벤트 리스너 설정 - 통합 LocalAI 이벤트 사용
             const progressHandler = (event, data) => {
                 if (data.service === 'ollama' && data.model === modelName) {
                     this.installingModels = { ...this.installingModels, [modelName]: data.progress || 0 };
@@ -874,7 +843,6 @@ export class SettingsView extends LitElement {
                 }
             };
 
-            // 통합 LocalAI 이벤트 리스너 등록
             window.api.settingsView.onLocalAIInstallProgress(progressHandler);
 
             try {
@@ -884,15 +852,13 @@ export class SettingsView extends LitElement {
                     console.log(`[SettingsView] Model ${modelName} installed successfully`);
                     delete this.installingModels[modelName];
                     this.requestUpdate();
-                    
-                    // 상태 새로고침
+
                     await this.refreshOllamaStatus();
                     await this.refreshModelData();
                 } else {
                     throw new Error(result.error || 'Installation failed');
                 }
             } finally {
-                // 통합 LocalAI 이벤트 리스너 제거
                 window.api.settingsView.removeOnLocalAIInstallProgress(progressHandler);
             }
         } catch (error) {
@@ -903,12 +869,10 @@ export class SettingsView extends LitElement {
     }
     
     async downloadWhisperModel(modelId) {
-        // Mark as installing
         this.installingModels = { ...this.installingModels, [modelId]: 0 };
         this.requestUpdate();
-        
+
         try {
-            // Set up progress listener - 통합 LocalAI 이벤트 사용
             const progressHandler = (event, data) => {
                 if (data.service === 'whisper' && data.model === modelId) {
                     this.installingModels = { ...this.installingModels, [modelId]: data.progress || 0 };
@@ -917,40 +881,32 @@ export class SettingsView extends LitElement {
             };
             
             window.api.settingsView.onLocalAIInstallProgress(progressHandler);
-            
-            // Start download
+
             const result = await window.api.settingsView.downloadWhisperModel(modelId);
-            
+
             if (result.success) {
-                // Update the model's installed status
                 if (this.providerConfig?.whisper?.sttModels) {
                     const modelInfo = this.providerConfig.whisper.sttModels.find(m => m.id === modelId);
                     if (modelInfo) {
                         modelInfo.installed = true;
                     }
                 }
-                
-                // Remove from installing models
+
                 delete this.installingModels[modelId];
                 this.requestUpdate();
-                
-                // Reload LocalAI status to get fresh data
+
                 await this.loadLocalAIStatus();
-                
-                // Auto-select the model after download
+
                 await this.selectModel('stt', modelId);
             } else {
-                // Remove from installing models on failure too
                 delete this.installingModels[modelId];
                 this.requestUpdate();
                 alert(`Failed to download Whisper model: ${result.error}`);
             }
-            
-            // Cleanup
+
             window.api.settingsView.removeOnLocalAIInstallProgress(progressHandler);
         } catch (error) {
             console.error(`[SettingsView] Error downloading Whisper model ${modelId}:`, error);
-            // Remove from installing models on error
             delete this.installingModels[modelId];
             this.requestUpdate();
             alert(`Error downloading ${modelId}: ${error.message}`);
@@ -966,8 +922,6 @@ export class SettingsView extends LitElement {
         }
         return null;
     }
-
-    //////// after_modelStateService ////////
 
     openShortcutEditor() {
         window.api.settingsView.openShortcutSettingsWindow();
@@ -1025,12 +979,12 @@ export class SettingsView extends LitElement {
         this.cleanupEventListeners();
         this.cleanupIpcListeners();
         this.cleanupWindowResize();
-        
-        // Cancel any ongoing Ollama installations when component is destroyed
+
         const installingModels = Object.keys(this.installingModels);
         if (installingModels.length > 0) {
             installingModels.forEach(modelName => {
-                window.api.settingsView.cancelOllamaInstallation(modelName);
+                // Not exposed by preload yet; skip instead of throwing on teardown.
+                window.api.settingsView.cancelOllamaInstallation?.(modelName);
             });
         }
     }
@@ -1080,8 +1034,7 @@ export class SettingsView extends LitElement {
             this.updateScrollHeight();
         };
         window.addEventListener('resize', this.resizeHandler);
-        
-        // Initial setup
+
         setTimeout(() => this.updateScrollHeight(), 100);
     }
 
@@ -1092,9 +1045,9 @@ export class SettingsView extends LitElement {
     }
 
     updateScrollHeight() {
-        // Electron 일부 시점에서 window.innerHeight 가 0 으로 보고되는 버그 보호
+        // Electron sometimes reports window.innerHeight as 0.
         const rawHeight = window.innerHeight || (window.screen ? window.screen.height : 0);
-        const MIN_HEIGHT = 300; // 최소 보장 높이
+        const MIN_HEIGHT = 300;
         const maxHeight = Math.max(MIN_HEIGHT, rawHeight);
 
         this.style.maxHeight = `${maxHeight}px`;
@@ -1133,7 +1086,6 @@ export class SettingsView extends LitElement {
             'Up': '↑', 'Down': '↓', 'Left': '←', 'Right': '→'
         };
 
-        // scrollDown/scrollUp의 특수 처리
         if (accelerator.includes('↕')) {
             const keys = accelerator.replace('↕','').split('+');
             keys.push('↕');
@@ -1219,7 +1171,6 @@ export class SettingsView extends LitElement {
         if (!window.api) return;
         
         try {
-            // Show loading state
             this.ollamaStatus = { ...this.ollamaStatus, running: false };
             this.requestUpdate();
             
@@ -1227,21 +1178,17 @@ export class SettingsView extends LitElement {
             
             if (result.success) {
                 console.log('[SettingsView] Ollama shut down successfully');
-                // Refresh status to reflect the change
                 await this.refreshOllamaStatus();
             } else {
                 console.error('[SettingsView] Failed to shutdown Ollama:', result.error);
-                // Restore previous state on error
                 await this.refreshOllamaStatus();
             }
         } catch (error) {
             console.error('[SettingsView] Error during Ollama shutdown:', error);
-            // Restore previous state on error
             await this.refreshOllamaStatus();
         }
     }
 
-    //////// after_modelStateService ////////
     render() {
         if (this.isLoading) {
             return html`
@@ -1259,7 +1206,6 @@ export class SettingsView extends LitElement {
                 ${Object.entries(this.providerConfig)
                     .map(([id, config]) => {
                         if (id === 'ollama') {
-                            // Special UI for Ollama
                             return html`
                                 <div class="provider-key-group">
                                     <label>${config.name} (Local)</label>
@@ -1290,7 +1236,6 @@ export class SettingsView extends LitElement {
                         }
                         
                         if (id === 'whisper') {
-                            // Simplified UI for Whisper without model selection
                             return html`
                                 <div class="provider-key-group">
                                     <label>${config.name} (Local STT)</label>
@@ -1309,8 +1254,7 @@ export class SettingsView extends LitElement {
                                 </div>
                             `;
                         }
-                        
-                        // Regular providers
+
                         return html`
                         <div class="provider-key-group">
                             <label for="key-input-${id}">${config.name} API Key</label>
@@ -1563,7 +1507,6 @@ export class SettingsView extends LitElement {
             </div>
         `;
     }
-    //////// after_modelStateService ////////
 }
 
 customElements.define('settings-view', SettingsView);

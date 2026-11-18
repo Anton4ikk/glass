@@ -33,6 +33,9 @@ const STREAM_BROADCAST_MS = 40;
 const REASONING_BROADCAST_MS = 250;
 
 const MAX_HISTORY_TURNS = 30;
+// Answers kept in memory: for the previous/next answer shortcuts, and to show
+// an answer again when its question is repeated instead of generating a new one.
+const MAX_ANSWERS = 50;
 
 const initialState = () => ({
     isVisible: false,
@@ -81,6 +84,98 @@ class AskService {
         this.state = initialState();
         this.broadcastTimer = null;
         this.lastBroadcast = 0;
+
+        // Every request, oldest first: {id, question, subject, kind, source,
+        // response, status: 'pending'|'done'|'interrupted', createdAt}.
+        // liveEntry is the newest one, the one this.state describes.
+        this.answers = [];
+        this.nextAnswerId = 1;
+        this.liveEntry = null;
+        // An older answer shown instead of the live one: {entry, replay}.
+        // `replay` marks an answer shown again for a repeated question.
+        this.view = null;
+    }
+
+    /**
+     * What the window shows: the live state, or an older answer in its place.
+     * `view` tells the window which answer of how many it is and when it was given.
+     */
+    _viewState() {
+        if (!this.view) return { ...this.state, view: null };
+        const { entry, replay } = this.view;
+        const browsable = this._browsableAnswers();
+        const view = { number: browsable.indexOf(entry) + 1, count: browsable.length, at: entry.createdAt, replay };
+        if (entry === this.liveEntry && entry.status === 'pending') return { ...this.state, view };
+        return {
+            ...this.state,
+            isLoading: false,
+            isStreaming: false,
+            reasoningChars: 0,
+            showTextInput: false,
+            currentQuestion: entry.question,
+            currentResponse: entry.response,
+            view,
+        };
+    }
+
+    /** Whether an older answer covers the live one (its updates then wait). */
+    _showingOlderAnswer() {
+        return !!this.view && this.view.entry !== this.liveEntry;
+    }
+
+    /** Answers the shortcuts step through: those with text, and the one in progress. */
+    _browsableAnswers() {
+        return this.answers.filter(entry => entry.response || entry.status === 'pending');
+    }
+
+    _addAnswer({ question, subject, kind, source }) {
+        const entry = { id: this.nextAnswerId++, question, subject, kind, source, response: '', status: 'pending', createdAt: Date.now() };
+        this.answers.push(entry);
+        if (this.answers.length > MAX_ANSWERS) this.answers.shift();
+        return entry;
+    }
+
+    /** Answers given since `sinceId` (inclusive), oldest first. */
+    getAnswers(sinceId = 0) {
+        return this.answers.filter(entry => entry.id >= sinceId);
+    }
+
+    /** The id the next answer will get: a session marks where its answers start. */
+    peekNextAnswerId() {
+        return this.nextAnswerId;
+    }
+
+    /**
+     * Shows an answer already given, without asking the model again.
+     * @param {{replay?: boolean}} [options] replay: shown again for a repeated question
+     * @returns {boolean} false if the answer is no longer kept
+     */
+    showAnswer(id, { replay = false } = {}) {
+        const entry = this.answers.find(e => e.id === id);
+        if (!entry) return false;
+        this.view = { entry, replay };
+        internalBridge.emit('window:requestVisibility', { name: 'ask', visible: true });
+        this._broadcastState();
+        return true;
+    }
+
+    showPreviousAnswer() {
+        this._stepAnswer(-1);
+    }
+
+    showNextAnswer() {
+        this._stepAnswer(1);
+    }
+
+    _stepAnswer(delta) {
+        const browsable = this._browsableAnswers();
+        if (browsable.length === 0) return;
+        const current = this.view?.entry || this.liveEntry;
+        const index = browsable.indexOf(current);
+        const from = index === -1 ? browsable.length : index;
+        const target = browsable[Math.min(browsable.length - 1, Math.max(0, from + delta))];
+        this.view = { entry: target, replay: false };
+        this._broadcastState();
     }
 
     _askWindow() {
@@ -91,12 +186,13 @@ class AskService {
     _broadcastState() {
         this._cancelScheduledBroadcast();
         this.lastBroadcast = Date.now();
-        this._askWindow()?.webContents.send('ask:stateUpdate', this.state);
+        this._askWindow()?.webContents.send('ask:stateUpdate', this._viewState());
     }
 
     /** Broadcasts at most once per `intervalMs`, always delivering the latest state. */
     _scheduleBroadcast(intervalMs) {
-        if (this.broadcastTimer) return;
+        // The live answer streams on behind an older one; it shows when stepped to.
+        if (this.broadcastTimer || this._showingOlderAnswer()) return;
         const wait = this.lastBroadcast + intervalMs - Date.now();
         if (wait <= 0) {
             this._broadcastState();
@@ -117,7 +213,12 @@ class AskService {
 
     /** Whether a question the user asked is still being answered (auto answers must not replace it). */
     isAnsweringUser() {
-        return this.requestSource === 'user' && (this.state.isLoading || this.state.isStreaming);
+        return this.requestSource === 'user' && this.isAnswering();
+    }
+
+    /** Whether any answer (asked by the user or automatic) is still being produced. */
+    isAnswering() {
+        return this.state.isLoading || this.state.isStreaming;
     }
 
     async toggleAskButton(inputScreenOnly = false) {
@@ -131,6 +232,8 @@ class AskService {
 
         const hasContent = this.state.isLoading || this.state.isStreaming || !!this.state.currentResponse;
         if (isVisible && hasContent) {
+            // The text input belongs to the live answer: leave an older one.
+            this.view = null;
             this.state.showTextInput = !this.state.showTextInput;
             this._broadcastState();
             return;
@@ -151,6 +254,7 @@ class AskService {
         }
         this.requestSource = null;
         this.state = initialState();
+        this.view = null;
         this._broadcastState();
         internalBridge.emit('window:requestVisibility', { name: 'ask', visible: false });
         return { success: true };
@@ -167,11 +271,25 @@ class AskService {
      * Answers in the Ask window, replacing (aborting) any answer in progress.
      * @param {string} userPrompt
      * @param {string[]} conversationHistoryRaw live transcript lines
-     * @param {{source?: 'user'|'auto'}} [options]
+     * @param {{source?: 'user'|'auto', kind?: 'question'|'task', subject?: string}} [options]
+     *   kind/subject: what the answer is about, to recognize a repeat later
+     *   (subject defaults to the prompt; for 'task' it is the task on screen)
      * @returns {Promise<{success: boolean, aborted?: boolean, error?: string}>}
      */
-    async sendMessage(userPrompt, conversationHistoryRaw = [], { source = 'user' } = {}) {
+    async sendMessage(userPrompt, conversationHistoryRaw = [], { source = 'user', kind = 'question', subject } = {}) {
         const prompt = (userPrompt || '').trim();
+        // Created before the first await: the caller can read it right after the call.
+        const entry = this._addAnswer({ question: prompt, subject: subject ?? prompt, kind, source });
+        this.liveEntry = entry;
+        this.view = null;
+        try {
+            return await this._answer(entry, userPrompt, prompt, conversationHistoryRaw, source);
+        } finally {
+            if (entry.status === 'pending') entry.status = 'interrupted';
+        }
+    }
+
+    async _answer(entry, userPrompt, prompt, conversationHistoryRaw, source) {
         internalBridge.emit('window:requestVisibility', { name: 'ask', visible: true });
         this.state = {
             ...this.state,
@@ -237,7 +355,7 @@ class AskService {
                 think,
             });
 
-            const stream = messages => this._streamAnswer(streamingLLM, messages, sessionId, signal);
+            const stream = messages => this._streamAnswer(streamingLLM, messages, sessionId, signal, entry);
             if (!imageMessages) return await stream(textMessages);
             try {
                 return await stream(imageMessages);
@@ -258,7 +376,7 @@ class AskService {
         }
     }
 
-    async _streamAnswer(streamingLLM, messages, sessionId, signal) {
+    async _streamAnswer(streamingLLM, messages, sessionId, signal, entry) {
         // A newer request may have replaced this one while the context was gathered.
         if (signal.aborted) return { success: false, aborted: true };
 
@@ -271,7 +389,7 @@ class AskService {
         const reader = this._readerUnlessAborted(response, signal);
         if (!reader) return { success: false, aborted: true };
 
-        await this._processStream(reader, askWin, sessionId, signal);
+        await this._processStream(reader, askWin, sessionId, signal, entry);
         return { success: true };
     }
 
@@ -293,9 +411,11 @@ class AskService {
         return reader;
     }
 
-    async _processStream(reader, askWin, sessionId, signal) {
+    /** @param {object} [entry] the answer record that receives the text */
+    async _processStream(reader, askWin, sessionId, signal, entry = null) {
         const parser = createSseParser();
         let fullResponse = '';
+        let failed = false;
 
         try {
             // isLoading stays on until the first answer token: a reasoning model
@@ -328,6 +448,7 @@ class AskService {
                 }
             }
         } catch (streamError) {
+            failed = true;
             if (!signal.aborted) {
                 console.error('[AskService] Error while processing stream:', streamError);
                 if (askWin && !askWin.isDestroyed()) {
@@ -335,6 +456,10 @@ class AskService {
                 }
             }
         } finally {
+            if (entry) {
+                entry.response = fullResponse;
+                entry.status = signal.aborted || failed ? 'interrupted' : 'done';
+            }
             // Once replaced, the window shows the newer request: leave it alone.
             if (!signal.aborted) {
                 this.state.isLoading = false;

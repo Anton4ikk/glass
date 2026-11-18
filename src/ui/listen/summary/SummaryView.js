@@ -7,9 +7,6 @@ export class SummaryView extends LitElement {
             width: 100%;
         }
 
-        /* Inherit font styles from parent */
-
-        /* highlight.js 스타일 추가 */
         .insights-container pre {
             background: rgba(0, 0, 0, 0.4) !important;
             border-radius: 8px !important;
@@ -85,8 +82,6 @@ export class SummaryView extends LitElement {
             max-height: 600px;
             flex: 1;
         }
-
-        /* Visibility handled by parent component */
 
         .insights-container::-webkit-scrollbar {
             width: 8px;
@@ -170,7 +165,6 @@ export class SummaryView extends LitElement {
             transform: translateX(2px);
         }
 
-        /* 마크다운 렌더링된 콘텐츠 스타일 */
         .markdown-content {
             color: #ffffff;
             font-size: 11px;
@@ -282,7 +276,6 @@ export class SummaryView extends LitElement {
         this.isVisible = true;
         this.hasCompletedRecording = false;
 
-        // 마크다운 라이브러리 초기화
         this.marked = null;
         this.hljs = null;
         this.isLibrariesLoaded = false;
@@ -309,7 +302,6 @@ export class SummaryView extends LitElement {
         }
     }
 
-    // Handle session reset from parent
     resetAnalysis() {
         this.structuredData = {
             summary: [],

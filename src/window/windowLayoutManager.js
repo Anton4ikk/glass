@@ -1,8 +1,11 @@
 const { screen } = require('electron');
 
+// Height of the main header's button bar (MainHeader BAR_HEIGHT); the header
+// window is taller because the shortcut list sits under the bar.
+const HEADER_BAR_HEIGHT = 47;
+
 /**
- * 
- * @param {BrowserWindow} window 
+ * @param {BrowserWindow} window
  * @returns {Display}
  */
 function getCurrentDisplay(window) {
@@ -19,7 +22,7 @@ function getCurrentDisplay(window) {
 
 class WindowLayoutManager {
     /**
-     * @param {Map<string, BrowserWindow>} windowPool - 관리할 창들의 맵
+     * @param {Map<string, BrowserWindow>} windowPool
      */
     constructor(windowPool) {
         this.windowPool = windowPool;
@@ -38,7 +41,6 @@ class WindowLayoutManager {
 
 
     /**
-     * 
      * @returns {{name: string, primary: string, secondary: string}}
      */
     determineLayoutStrategy(headerBounds, screenWidth, screenHeight, relativeX, relativeY, workAreaX, workAreaY) {
@@ -84,8 +86,10 @@ class WindowLayoutManager {
         const PAD = 5;
         const buttonPadding = 170;
 
+        // Anchored to the button bar, not the whole header window: the shortcut
+        // list under the bar would put the menu out of the mouse's reach.
         const x = headerBounds.x + headerBounds.width - settingsBounds.width + buttonPadding;
-        const y = headerBounds.y + headerBounds.height + PAD;
+        const y = headerBounds.y + Math.min(headerBounds.height, HEADER_BAR_HEIGHT) + PAD;
 
         const clampedX = Math.max(workAreaX + 10, Math.min(workAreaX + screenWidth - settingsBounds.width - 10, x));
         const clampedY = Math.max(workAreaY + 10, Math.min(workAreaY + screenHeight - settingsBounds.height - 10, y));
@@ -127,8 +131,7 @@ class WindowLayoutManager {
         console.log(`[Layout Debug] calculateWindowHeightAdjustment: targetHeight=${targetHeight}`);
         return { ...currentBounds, height: adjustedHeight };
     }
-    
-    // 기존 getTargetBoundsForFeatureWindows를 이 함수로 대체합니다.
+
     calculateFeatureWindowLayout(visibility, headerBoundsOverride = null) {
         const header = this.windowPool.get('header');
         const headerBounds = headerBoundsOverride || (header ? header.getBounds() : null);
@@ -240,7 +243,7 @@ class WindowLayoutManager {
     calculateStepMovePosition(header, direction) {
         if (!header) return null;
         const currentBounds = header.getBounds();
-        const stepSize = 80; // 이동 간격
+        const stepSize = 80;
         let targetX = currentBounds.x;
         let targetY = currentBounds.y;
     

@@ -99,7 +99,6 @@ export class PickleGlassApp extends LitElement {
             }
         }
 
-        // Only update localStorage when these specific properties change
         if (changedProperties.has('selectedProfile')) {
             localStorage.setItem('selectedProfile', this.selectedProfile);
         }

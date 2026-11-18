@@ -4,6 +4,8 @@ const summaryRepository = require('./repositories');
 const modelStateService = require('../../common/services/modelStateService');
 const { isTextOnly, markTextOnly } = require('../../common/ai/textOnlyModels');
 const { aboutMePromptSection } = require('../../common/prompts/aboutMe');
+// Called through the module object so tests can stub the LLM call.
+const questionDetector = require('./questionDetector');
 
 // Analysis gets its own prompt: the shared 'pickle_glass_analysis' profile is
 // written for Ask (it promises a screenshot and forbids summaries), which
@@ -49,10 +51,20 @@ const DEFAULT_LANGUAGE_RULE = 'Write all content in the language of the conversa
 // New turns arriving within this window are analyzed together (the "me" and
 // "them" streams often flush a turn each at the same moment).
 const ANALYSIS_DEBOUNCE_MS = 1500;
-// Each analysis sends a screenshot to the LLM; on a local model that competes
-// with whisper and the video call for the machine, so runs are spaced out.
-// The first turn of a session is still analyzed right away.
-const ANALYSIS_MIN_INTERVAL_MS = 12000;
+// Each analysis sends a screenshot (~20 s on gemma4:e4b with whisper running)
+// and competes with whisper and the call for the machine. Questions come from
+// the question detector, so the summary can be rare; the first turn of a
+// session is still analyzed right away, to find the task on screen.
+const ANALYSIS_MIN_INTERVAL_MS = 45000;
+// The "me" and "them" streams often flush a turn each at the same moment,
+// and a long question can arrive as two turns.
+const DETECTION_DEBOUNCE_MS = 700;
+// What the question detector sees: the new turns, some turns before them for
+// context, and the last questions already answered (so it recognizes repeats).
+const DETECTION_MAX_NEW_TURNS = 6;
+const DETECTION_CONTEXT_TURNS = 6;
+const DETECTION_ANSWERED_CONTEXT = 8;
+const MAX_DETECTED_QUESTIONS = 20;
 const MAX_PROMPT_TURNS = 30;
 // Extraction, not creative writing: a low temperature keeps the open
 // questions worded the same between runs, so fewer look new to the auto answer.
@@ -142,7 +154,14 @@ function detectSectionHeader(line) {
     return { section: header.section, topicName };
 }
 
+/** `questions` with `question` first, without a rephrased copy of it. */
+const withQuestion = (questions, question) =>
+    [question, ...(questions || []).filter(q => !isSameQuestion(q, question))].slice(0, MAX_OPEN_QUESTIONS);
+
 const stripListMarker = line => line.replace(/^(\d+[.)]|[-•*])\s*/, '').trim();
+
+// Lazy: askService pulls in the window manager.
+const getAskService = () => require('../../ask/askService');
 
 class SummaryService {
     constructor() {
@@ -163,12 +182,24 @@ class SummaryService {
         this.analysisPending = false;
         this.lastAnalysisStartedAt = -Infinity;
 
+        // Question detection: one run at a time over the turns after
+        // lastDetectedCount. Detected questions (with when they were found)
+        // are kept on screen even if a summary started earlier lands later.
+        this.detectionTimer = null;
+        this.detectionRunning = false;
+        this.detectionPending = false;
+        this.lastDetectedCount = 0;
+        this.detectedQuestions = [];
+
         // Questions already answered automatically in this session.
         this.autoAnsweredQuestions = [];
         this.autoAnsweredScreenTasks = [];
-        // Auto answers only while listening. Analyses still running when the
-        // user presses Stop update the insights but must not open Ask again:
-        // closing the session clears the answered lists above, so to them
+        // A detected question that waited for an answer to the user's own one.
+        this.deferredQuestion = null;
+        // Ask's answers from this id on belong to the current session.
+        this.firstAnswerId = Infinity;
+        // Auto answers only while listening: analyses still running after Stop
+        // must not open Ask, since Stop clears the answered lists above and
         // every question would look new.
         this.autoAnswerEnabled = false;
     }
@@ -176,6 +207,8 @@ class SummaryService {
     setSessionId(sessionId) {
         this.currentSessionId = sessionId;
         this.autoAnswerEnabled = true;
+        // Answers from here on belong to this session (see sessionAnswers).
+        this.firstAnswerId = getAskService().peekNextAnswerId?.() ?? 0;
     }
 
     sendToRenderer(channel, data) {
@@ -189,6 +222,7 @@ class SummaryService {
     addConversationTurn(speaker, text) {
         this.conversationHistory.push(`${speaker.toLowerCase()}: ${text.trim()}`);
         this.scheduleAnalysis();
+        this.scheduleDetection();
     }
 
     getConversationHistory() {
@@ -203,7 +237,12 @@ class SummaryService {
         this.analysisPending = false;
         this.autoAnsweredQuestions = [];
         this.autoAnsweredScreenTasks = [];
+        this.deferredQuestion = null;
         this.lastAnalysisStartedAt = -Infinity;
+        this.cancelScheduledDetection();
+        this.detectionPending = false;
+        this.lastDetectedCount = 0;
+        this.detectedQuestions = [];
     }
 
     formatConversationForPrompt(conversationTexts, maxTurns = MAX_PROMPT_TURNS) {
@@ -268,6 +307,8 @@ Keep all points concise and build upon previous analysis if provided.${languageR
             model: modelInfo.model,
             temperature: ANALYSIS_TEMPERATURE,
             maxTokens: 1024,
+            // Yields to the question detector and Ask on a local model.
+            background: true,
             // Never reason here: the hidden reasoning (~1000 tokens on gemma4)
             // would eat the 1024-token budget and leave an empty summary, and a
             // slow background summary also holds up Ask in the Ollama queue.
@@ -436,6 +477,7 @@ Keep all points concise and build upon previous analysis if provided.${languageR
         // Everything the analysis depends on is read now: Stop resets this
         // service's state while the final analysis is still in flight.
         const seq = ++this.analysisSeq;
+        const startedAt = Date.now();
         const sessionId = this.currentSessionId;
         const conversationTexts = [...this.conversationHistory];
         const previousResult = this.previousAnalysisResult;
@@ -483,9 +525,14 @@ Keep all points concise and build upon previous analysis if provided.${languageR
         }
 
         if (!isCurrentSession) return;
+        // Questions detected while this analysis ran are newer than its result.
+        for (const { question, at } of this.detectedQuestions) {
+            if (at >= startedAt) structuredData.questions = withQuestion(structuredData.questions, question);
+        }
         this.previousAnalysisResult = structuredData;
         this.sendToRenderer('summary-update', structuredData);
-        this.autoAnswerNewestQuestion(structuredData);
+        this.autoAnswerScreenTask(structuredData);
+        this.retryDeferredQuestion();
     }
 
     markApplied(sessionId, seq) {
@@ -497,32 +544,204 @@ Keep all points concise and build upon previous analysis if provided.${languageR
     }
 
     /**
-     * Answers in Ask without a click: first the task on screen (once per
-     * task), then the newest question heard. A newer question interrupts the
-     * auto answer to an older one; a question that was already answered (even
-     * if rephrased) is not repeated. A question the user asked themselves is
-     * never interrupted: the auto answer waits for the next analysis.
+     * Checks the newest turns for a question shortly after they arrive.
+     * Unlike the summary this does not wait for the minimum interval.
      */
-    autoAnswerNewestQuestion({ screenTask, screenTaskQuestion, questions } = {}) {
-        if (!this.autoAnswerEnabled) return;
-        const askService = require('../../ask/askService');
-        if (askService.isAnsweringUser?.()) return;
+    scheduleDetection() {
+        this.cancelScheduledDetection();
+        this.detectionTimer = setTimeout(() => {
+            this.detectionTimer = null;
+            this.runDetection();
+        }, DETECTION_DEBOUNCE_MS);
+    }
 
-        let question = null;
-        if (screenTask && !this.autoAnsweredScreenTasks.some(t => isSameQuestion(t, screenTask))) {
-            this.autoAnsweredScreenTasks.push(screenTask);
-            question = screenTaskQuestion;
-        } else {
-            const newest = questions?.[0];
-            if (newest && !this.autoAnsweredQuestions.some(q => isSameQuestion(q, newest))) {
-                this.autoAnsweredQuestions.push(newest);
-                question = newest;
-            }
+    cancelScheduledDetection() {
+        if (this.detectionTimer) {
+            clearTimeout(this.detectionTimer);
+            this.detectionTimer = null;
         }
-        if (!question) return;
+    }
 
+    async runDetection() {
+        if (this.detectionRunning) {
+            this.detectionPending = true;
+            return;
+        }
+        this.detectionRunning = true;
+        try {
+            await this.detectNewQuestion();
+        } catch (error) {
+            console.error('[SummaryService] Question detection failed:', error.message);
+        } finally {
+            this.detectionRunning = false;
+        }
+        if (this.detectionPending) {
+            this.detectionPending = false;
+            if (this.conversationHistory.length > this.lastDetectedCount) await this.runDetection();
+        }
+    }
+
+    /** Looks for a question in the turns since the last check and auto-answers it. */
+    async detectNewQuestion() {
+        this.retryDeferredQuestion();
+        const history = this.conversationHistory;
+        const start = this.lastDetectedCount;
+        this.lastDetectedCount = history.length;
+        const fresh = history.slice(start).slice(-DETECTION_MAX_NEW_TURNS);
+        if (!this.autoAnswerEnabled || !fresh.some(questionDetector.looksLikeQuestion)) return;
+
+        const sessionId = this.currentSessionId;
+        const language = await this.getAnswerLanguage();
+        const answered = this.answeredQuestions();
+        const detected = await questionDetector.detectQuestion({
+            earlier: history.slice(Math.max(0, start - DETECTION_CONTEXT_TURNS), start),
+            fresh,
+            answered: answered.map(a => a.text),
+            language,
+        });
+        // Stop, or a new session, while the detector ran.
+        if (!detected || sessionId !== this.currentSessionId || !this.autoAnswerEnabled) return;
+
+        const repeated = detected.repeat ? answered[detected.repeat - 1] : null;
+        if (repeated) {
+            console.log(`[SummaryService] Repeated question: ${repeated.text}`);
+            this.showDetectedQuestion(repeated.text, language);
+            this.answerAgain(repeated.text, repeated.entry);
+            return;
+        }
+        console.log(`[SummaryService] Detected question: ${detected.question}`);
+        this.showDetectedQuestion(detected.question, language);
+        this.autoAnswerQuestion(detected.question);
+    }
+
+    /** Answers given in this session, oldest first, including to questions the user asked. */
+    sessionAnswers() {
+        return getAskService().getAnswers?.(this.firstAnswerId) || [];
+    }
+
+    /**
+     * The newest questions answered in this session, oldest first, for the
+     * detector: [{text, entry}]. entry is the answer, if Ask still keeps it.
+     */
+    answeredQuestions() {
+        const items = this.sessionAnswers()
+            .filter(entry => entry.kind === 'question' && entry.subject)
+            .map(entry => ({ text: entry.subject, entry }));
+        for (const text of this.autoAnsweredQuestions) {
+            if (!items.some(item => item.text === text)) items.push({ text, entry: null });
+        }
+        // A question answered twice (the first answer was cut off) is listed once, as its newest answer.
+        const unique = items.filter((item, i) => !items.slice(i + 1).some(later => later.text === item.text));
+        return unique.slice(-DETECTION_ANSWERED_CONTEXT);
+    }
+
+    /**
+     * The answer to `question` (or a rewording of it) given in this session:
+     * the newest finished or still running one, else the newest cut-off one.
+     */
+    findAnswer(question) {
+        const matches = this.sessionAnswers()
+            .filter(e => e.question === question || (e.kind === 'question' && e.subject && isSameQuestion(e.subject, question)))
+            .reverse();
+        return matches.find(e => e.status !== 'interrupted') || matches[0] || null;
+    }
+
+    /**
+     * A question answered earlier in this session was asked again: shows the
+     * answer given then. A new one would cost the model another run and could
+     * differ from what the user already said. An answer cut off by a newer
+     * question is generated again.
+     */
+    answerAgain(question, entry = this.findAnswer(question)) {
+        if (!entry) {
+            this.autoAnswerQuestion(question);
+            return;
+        }
+        if (entry.status === 'pending') return;
+        if (!this.canAutoAnswer({ interrupt: true })) {
+            if (this.autoAnswerEnabled) this.deferredQuestion = question;
+            return;
+        }
+        this.deferredQuestion = null;
+        if (entry.status === 'interrupted') {
+            this.autoAsk(entry.subject);
+            return;
+        }
+        console.log(`[SummaryService] Showing the earlier answer again: ${entry.subject}`);
+        getAskService().showAnswer(entry.id, { replay: true });
+    }
+
+    /** Puts a detected question at the top of the open questions on screen right away. */
+    showDetectedQuestion(question, language) {
+        this.detectedQuestions.push({ question, at: Date.now() });
+        if (this.detectedQuestions.length > MAX_DETECTED_QUESTIONS) this.detectedQuestions.shift();
+        const current = this.previousAnalysisResult || this.parseResponseText('', null, language);
+        this.previousAnalysisResult = { ...current, questions: withQuestion(current.questions, question) };
+        this.sendToRenderer('summary-update', this.previousAnalysisResult);
+    }
+
+    /**
+     * Whether Ask may be opened without a click now. A question the user
+     * asked themselves is never interrupted; with `interrupt: false` no
+     * answer in progress is (the task on screen waits for a free moment).
+     */
+    canAutoAnswer({ interrupt }) {
+        if (!this.autoAnswerEnabled) return false;
+        const askService = getAskService();
+        if (askService.isAnsweringUser?.()) return false;
+        return interrupt || !askService.isAnswering?.();
+    }
+
+    /**
+     * Answers a detected question in Ask, once: a question already answered
+     * (even if rephrased) is not repeated. It replaces an auto answer to an
+     * older question. While the user's own question is being answered it is
+     * kept and tried again on the next detection or summary.
+     */
+    autoAnswerQuestion(question) {
+        if (!question) return;
+        // Answered already (also when the user asked it): show that answer.
+        const earlier = this.findAnswer(question);
+        if (earlier) {
+            this.answerAgain(question, earlier);
+            return;
+        }
+        // Asked before, but its answer is no longer kept.
+        if (this.autoAnsweredQuestions.some(q => isSameQuestion(q, question))) return;
+        if (!this.canAutoAnswer({ interrupt: true })) {
+            if (this.autoAnswerEnabled) this.deferredQuestion = question;
+            return;
+        }
+        this.deferredQuestion = null;
+        this.autoAnsweredQuestions.push(question);
+        this.autoAsk(question);
+    }
+
+    retryDeferredQuestion() {
+        if (this.deferredQuestion) this.autoAnswerQuestion(this.deferredQuestion);
+    }
+
+    /** Solves the task the summary found on screen, once per task. */
+    autoAnswerScreenTask({ screenTask, screenTaskQuestion } = {}) {
+        if (!screenTask || this.autoAnsweredScreenTasks.some(t => isSameQuestion(t, screenTask))) return;
+        // The user clicked it in the open questions, or it was solved before.
+        const solved = this.sessionAnswers().some(
+            e => e.question === screenTaskQuestion?.trim() || (e.kind === 'task' && isSameQuestion(e.subject, screenTask))
+        );
+        if (solved) {
+            this.autoAnsweredScreenTasks.push(screenTask);
+            return;
+        }
+        // Not marked as answered when skipped: the next summary tries again.
+        if (!this.canAutoAnswer({ interrupt: false })) return;
+        this.autoAnsweredScreenTasks.push(screenTask);
+        this.autoAsk(screenTaskQuestion, { kind: 'task', subject: screenTask });
+    }
+
+    /** @param {{kind?: 'question'|'task', subject?: string}} [about] see askService.sendMessage */
+    autoAsk(question, about = {}) {
         console.log(`[SummaryService] Auto-answering: ${question}`);
-        askService.sendMessage(question, [...this.conversationHistory], { source: 'auto' }).catch(error => {
+        getAskService().sendMessage(question, [...this.conversationHistory], { source: 'auto', ...about }).catch(error => {
             console.error('[SummaryService] Auto answer failed:', error.message);
         });
     }
@@ -560,3 +779,4 @@ Keep all points concise and build upon previous analysis if provided.${languageR
 module.exports = SummaryService;
 // Exported for tests.
 module.exports.isSameQuestion = isSameQuestion;
+module.exports.ANALYSIS_MIN_INTERVAL_MS = ANALYSIS_MIN_INTERVAL_MS;

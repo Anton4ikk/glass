@@ -26,7 +26,6 @@ const MAX_UTTERANCE_MS = 12000;         // force a cut during long monologues
 const MIN_SPEECH_MS = 300;              // ignore clicks and short bursts
 const PRE_ROLL_MS = 300;                // keep audio just before speech onset
 const CLOSE_DRAIN_TIMEOUT_MS = 10000;   // total time close() may wait for the last utterances
-// Half the cores of an 8-core M1: the LLM, the browser and the call share the machine.
 const { WHISPER_THREADS } = require('../../services/whisperServer');
 
 // Phrases whisper produces from non-speech audio (artifacts of its subtitle
@@ -147,7 +146,7 @@ class WhisperSTTSession extends EventEmitter {
         }, 200);
     }
 
-    // Resolves once whisper-cli has exited and the transcription (if any) was emitted.
+    // Resolves once the run has finished and the transcription (if any) was emitted.
     processAudioChunk(audioData) {
         this.currentRun = this._runWhisper(audioData);
         return this.currentRun;
@@ -209,10 +208,9 @@ class WhisperSTTSession extends EventEmitter {
             // close() may have given up waiting while the file was being written.
             if (!this.isRunning) return null;
 
-            // No --output-txt/--output-json: the text is read from stdout (those
-            // files are named "<input>.wav.txt" and piled up in temp/). No
-            // --print-progress: it is a valueless toggle, and a value after it is
-            // parsed as a second input file.
+            // No --output-txt/--output-json: text is read from stdout (those files
+            // piled up in temp/). No --print-progress: it's a valueless toggle,
+            // and a value after it is parsed as a second input file.
             this.process = spawn(whisperPath, [
                 '-m', modelPath,
                 '-f', tempFile,
@@ -352,7 +350,6 @@ class WhisperSTTSession extends EventEmitter {
 
 class WhisperProvider {
     static async validateApiKey() {
-        // Whisper is a local service, no API key validation needed.
         return { success: true };
     }
 
@@ -379,17 +376,14 @@ class WhisperProvider {
             throw new Error('Whisper STT requires a model; none is selected.');
         }
         const sessionType = config.sessionType || 'unknown';
-        // Falls back to 'auto' only when nothing was configured; the user's
-        // explicit choice beats whisper's own detection, which is unreliable
-        // on chunks this short.
+        // 'auto' only when nothing was configured: whisper's own language
+        // detection is unreliable on chunks this short.
         const language = config.language || 'auto';
         console.log(`[WhisperProvider] Creating ${sessionType} STT session with model: ${model}, language: ${language}`);
 
-        // Create unique session ID based on type
         const sessionId = `${sessionType}_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
         const session = new WhisperSTTSession(model, this.whisperService, sessionId, language);
-        
-        // Log session creation
+
         console.log(`[WhisperProvider] Created session: ${sessionId}`);
         
         const initialized = await session.initialize();

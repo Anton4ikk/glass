@@ -1,4 +1,3 @@
-// Configuration management for environment-based settings
 const os = require('os');
 const path = require('path');
 const fs = require('fs');

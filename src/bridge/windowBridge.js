@@ -1,13 +1,11 @@
-// src/bridge/windowBridge.js
 const { ipcMain, shell } = require('electron');
 
-// Bridge는 단순히 IPC 핸들러를 등록하는 역할만 함 (비즈니스 로직 없음)
+// Only registers IPC handlers; no business logic here.
 module.exports = {
   initialize() {
-    // initialize 시점에 windowManager를 require하여 circular dependency 문제 해결
+    // Required lazily to break a circular dependency with windowManager.
     const windowManager = require('../window/windowManager');
-    
-    // 기존 IPC 핸들러들
+
     ipcMain.handle('toggle-content-protection', () => windowManager.toggleContentProtection());
     ipcMain.handle('resize-header-window', (event, args) => windowManager.resizeHeaderWindow(args));
     ipcMain.handle('get-content-protection-status', () => windowManager.getContentProtectionStatus());
@@ -18,7 +16,6 @@ module.exports = {
     ipcMain.handle('move-window-step', (event, direction) => windowManager.moveWindowStep(direction));
     ipcMain.handle('open-external', (event, url) => shell.openExternal(url));
 
-    // Newly moved handlers from windowManager
     ipcMain.on('header-state-changed', (event, state) => windowManager.handleHeaderStateChanged(state));
     ipcMain.on('header-animation-finished', (event, state) => windowManager.handleHeaderAnimationFinished(state));
     ipcMain.handle('get-header-position', () => windowManager.getHeaderPosition());

@@ -1,7 +1,6 @@
 import { html, css, LitElement } from '../assets/lit-core-2.7.4.min.js';
 
 export class ApiKeyHeader extends LitElement {
-    //////// after_modelStateService ////////
     static properties = {
         llmApiKey: { type: String },
         sttApiKey: { type: String },
@@ -25,7 +24,6 @@ export class ApiKeyHeader extends LitElement {
         llmError: { type: String },
         sttError: { type: String },
     };
-    //////// after_modelStateService ////////
 
     static styles = css`
         :host {
@@ -425,13 +423,11 @@ export class ApiKeyHeader extends LitElement {
         this.errorMessage = '';
         this.successMessage = '';
         this.messageTimestamp = 0;
-        //////// after_modelStateService ////////
         this.llmApiKey = '';
         this.sttApiKey = '';
         this.llmProvider = 'openai';
         this.sttProvider = 'openai';
-        this.providers = { llm: [], stt: [] }; // 초기화
-        // Ollama related
+        this.providers = { llm: [], stt: [] };
         this.modelSuggestions = [];
         this.userModelHistory = [];
         this.selectedLlmModel = '';
@@ -446,7 +442,6 @@ export class ApiKeyHeader extends LitElement {
         this.llmError = '';
         this.sttError = '';
 
-        // Professional operation management system
         this.activeOperations = new Map();
         this.operationTimeouts = new Map();
         this.connectionState = 'idle'; // idle, connecting, connected, failed, disconnected
@@ -455,7 +450,6 @@ export class ApiKeyHeader extends LitElement {
         this.maxRetries = 3;
         this.baseRetryDelay = 1000;
 
-        // Backpressure and resource management
         this.operationQueue = [];
         this.maxConcurrentOperations = 2;
         this.maxQueueSize = 5;
@@ -467,11 +461,9 @@ export class ApiKeyHeader extends LitElement {
             averageResponseTime: 0,
         };
 
-        // Configuration
         this.ipcTimeout = 10000; // 10s for IPC calls
         this.operationTimeout = 15000; // 15s for complex operations
 
-        // Health monitoring system
         this.healthCheck = {
             enabled: false,
             intervalId: null,
@@ -481,10 +473,8 @@ export class ApiKeyHeader extends LitElement {
             maxFailures: 3,
         };
 
-        // Load user model history from localStorage
         this.loadUserModelHistory();
         this.loadProviderConfig();
-        //////// after_modelStateService ////////
 
         this.handleKeyPress = this.handleKeyPress.bind(this);
         this.handleSubmit = this.handleSubmit.bind(this);
@@ -539,27 +529,23 @@ export class ApiKeyHeader extends LitElement {
 
             this.providers = { llm: llmProviders, stt: sttProviders };
 
-            // 기본 선택 값 설정
             if (llmProviders.length > 0) this.llmProvider = llmProviders[0].id;
             if (sttProviders.length > 0) this.sttProvider = sttProviders[0].id;
 
-            // Restore what was configured previously. Without this the model
-            // selection always starts empty, which keeps Confirm disabled for
-            // providers that require a model (Whisper, Ollama).
+            // Without this the model selection starts empty, which keeps Confirm
+            // disabled for providers that require a model (Whisper, Ollama).
             await this.restoreSavedSelection(config);
 
             // Needed by the model picker whether or not Ollama is available
             await this.loadWhisperModels();
             await this.loadSttLanguage();
 
-            // Ollama 상태 및 모델 제안 로드
             if (ollamaStatus?.success) {
                 this.ollamaStatus = {
                     installed: ollamaStatus.installed,
                     running: ollamaStatus.running,
                 };
 
-                // Load model suggestions if Ollama is running
                 if (ollamaStatus.running) {
                     await this.loadModelSuggestions();
                 }
@@ -655,6 +641,7 @@ export class ApiKeyHeader extends LitElement {
             { id: 'whisper-base', name: 'Base', size: '74M' },
             { id: 'whisper-small', name: 'Small', size: '244M' },
             { id: 'whisper-medium', name: 'Medium', size: '769M' },
+            { id: 'whisper-large-v3-turbo', name: 'Large v3 Turbo', size: '574M' },
         ];
         const source = this.whisperModels.length > 0 ? this.whisperModels : fallback;
 
@@ -681,7 +668,6 @@ export class ApiKeyHeader extends LitElement {
 
         if (!modelId || this.sttProvider !== 'whisper') return;
 
-        // Only fetch what is missing - re-downloading an installed model is wasteful
         const model = this.whisperModels.find(m => m.id === modelId);
         const isInstalling = this.whisperInstallingModels[modelId] !== undefined;
         if (!model?.installed && !isInstalling) {
@@ -781,7 +767,6 @@ export class ApiKeyHeader extends LitElement {
         const newProvider = providerId || e.target.value;
         if (newProvider === this.llmProvider) return;
 
-        // Cancel any active operations first
         this._cancelAllActiveOperations();
 
         this.llmProvider = newProvider;
@@ -792,17 +777,14 @@ export class ApiKeyHeader extends LitElement {
             this.sttProvider = this.llmProvider;
         }
 
-        // Reset retry state
         this.retryCount = 0;
 
         if (this.llmProvider === 'ollama') {
             console.log('[ApiKeyHeader] Ollama selected, initiating connection...');
             await this._initializeOllamaConnection();
-            // Start health monitoring for Ollama
             this._startHealthMonitoring();
         } else {
             this._updateConnectionState('idle', 'Non-Ollama provider selected');
-            // Stop health monitoring for non-Ollama providers
             this._stopHealthMonitoring();
         }
 
@@ -811,7 +793,6 @@ export class ApiKeyHeader extends LitElement {
 
     async _initializeOllamaConnection() {
         try {
-            // Progressive connection attempt with exponential backoff
             await this._attemptOllamaConnection();
         } catch (error) {
             console.error('[ApiKeyHeader] Initial Ollama connection failed:', error.message);
@@ -822,14 +803,12 @@ export class ApiKeyHeader extends LitElement {
 
                 this.retryCount++;
 
-                // Use proper Promise-based delay instead of setTimeout
                 await new Promise(resolve => {
                     const retryTimeoutId = setTimeout(() => {
                         this._initializeOllamaConnection();
                         resolve();
                     }, delay);
 
-                    // Store timeout for cleanup
                     this.operationTimeouts.set(`retry_${this.retryCount}`, retryTimeoutId);
                 });
             } else {
@@ -845,27 +824,21 @@ export class ApiKeyHeader extends LitElement {
     _cancelAllActiveOperations() {
         console.log(`[ApiKeyHeader] Cancelling ${this.activeOperations.size} active operations and ${this.operationQueue.length} queued operations`);
 
-        // Cancel active operations
         for (const [operationType, operation] of this.activeOperations) {
             this._cancelOperation(operationType);
         }
 
-        // Cancel queued operations
         for (const queuedOp of this.operationQueue) {
             queuedOp.reject(new Error(`Operation ${queuedOp.type} cancelled during cleanup`));
         }
         this.operationQueue.length = 0;
 
-        // Clean up all timeouts
         for (const [timeoutId, timeout] of this.operationTimeouts) {
             clearTimeout(timeout);
         }
         this.operationTimeouts.clear();
     }
 
-    /**
-     * Get operation metrics for monitoring
-     */
     getOperationMetrics() {
         return {
             ...this.operationMetrics,
@@ -878,13 +851,9 @@ export class ApiKeyHeader extends LitElement {
         };
     }
 
-    /**
-     * Adaptive backpressure based on system performance
-     */
     _adjustBackpressureThresholds() {
         const metrics = this.getOperationMetrics();
 
-        // Reduce concurrent operations if success rate is low
         if (metrics.successRate < 70 && this.maxConcurrentOperations > 1) {
             this.maxConcurrentOperations = Math.max(1, this.maxConcurrentOperations - 1);
             console.log(
@@ -892,16 +861,12 @@ export class ApiKeyHeader extends LitElement {
             );
         }
 
-        // Increase if performance is good
         if (metrics.successRate > 90 && metrics.averageResponseTime < 3000 && this.maxConcurrentOperations < 3) {
             this.maxConcurrentOperations++;
             console.log(`[ApiKeyHeader] Increased max concurrent operations to ${this.maxConcurrentOperations}`);
         }
     }
 
-    /**
-     * Professional health monitoring system
-     */
     _startHealthMonitoring() {
         if (this.healthCheck.enabled) return;
 
@@ -926,7 +891,6 @@ export class ApiKeyHeader extends LitElement {
     }
 
     async _performHealthCheck() {
-        // Only perform health check if Ollama is selected and we're in a stable state
         if (this.llmProvider !== 'ollama' || this.connectionState === 'connecting') {
             return;
         }
@@ -935,7 +899,6 @@ export class ApiKeyHeader extends LitElement {
         this.healthCheck.lastCheck = now;
 
         try {
-            // Lightweight health check - just ping the service
             const isHealthy = await this._executeOperation(
                 'health_check',
                 async () => {
@@ -949,7 +912,6 @@ export class ApiKeyHeader extends LitElement {
             if (isHealthy) {
                 this.healthCheck.consecutiveFailures = 0;
 
-                // Update state if we were previously failed
                 if (this.connectionState === 'failed') {
                     this._updateConnectionState('connected', 'Health check recovered');
                 }
@@ -957,7 +919,6 @@ export class ApiKeyHeader extends LitElement {
                 this._handleHealthCheckFailure();
             }
 
-            // Adjust thresholds based on performance
             this._adjustBackpressureThresholds();
         } catch (error) {
             console.warn('[ApiKeyHeader] Health check failed:', error.message);
@@ -972,7 +933,6 @@ export class ApiKeyHeader extends LitElement {
             console.warn(`[ApiKeyHeader] Health check failed ${this.healthCheck.consecutiveFailures} times, marking as disconnected`);
             this._updateConnectionState('failed', 'Service health check failed');
 
-            // Increase health check frequency when having issues
             this.healthCheck.intervalMs = Math.max(10000, this.healthCheck.intervalMs / 2);
             this._restartHealthMonitoring();
         }
@@ -983,9 +943,6 @@ export class ApiKeyHeader extends LitElement {
         this._startHealthMonitoring();
     }
 
-    /**
-     * Get comprehensive health status
-     */
     getHealthStatus() {
         return {
             connection: {
@@ -1023,7 +980,6 @@ export class ApiKeyHeader extends LitElement {
             this.sttError = '*Ollama does not support STT yet. Please select Whisper or another STT provider.';
             this.messageTimestamp = Date.now();
 
-            // Auto-select Whisper if available
             const whisperProvider = this.providers.stt.find(p => p.id === 'whisper');
             if (whisperProvider) {
                 this.sttProvider = 'whisper';
@@ -1034,15 +990,11 @@ export class ApiKeyHeader extends LitElement {
         this.requestUpdate();
     }
 
-    /**
-     * Professional operation management with backpressure control
-     */
     async _executeOperation(operationType, operation, options = {}) {
         const operationId = `${operationType}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
         const timeout = options.timeout || this.ipcTimeout;
         const priority = options.priority || 'normal'; // high, normal, low
 
-        // Backpressure control
         if (this.activeOperations.size >= this.maxConcurrentOperations) {
             if (this.operationQueue.length >= this.maxQueueSize) {
                 throw new Error(`Operation queue full (${this.maxQueueSize}), rejecting ${operationType}`);
@@ -1068,7 +1020,6 @@ export class ApiKeyHeader extends LitElement {
                 priority: options.priority || 'normal',
             };
 
-            // Insert based on priority (high priority first)
             if (options.priority === 'high') {
                 this.operationQueue.unshift(queuedOperation);
             } else {
@@ -1083,13 +1034,11 @@ export class ApiKeyHeader extends LitElement {
         const startTime = Date.now();
         this.operationMetrics.totalOperations++;
 
-        // Check if similar operation is already running
         if (this.activeOperations.has(operationType)) {
             console.log(`[ApiKeyHeader] Operation ${operationType} already in progress, cancelling previous`);
             this._cancelOperation(operationType);
         }
 
-        // Create cancellation mechanism
         const cancellationPromise = new Promise((_, reject) => {
             const timeoutId = setTimeout(() => {
                 this.operationMetrics.timeouts++;
@@ -1186,7 +1135,6 @@ export class ApiKeyHeader extends LitElement {
             this.connectionState = newState;
             this.lastStateChange = Date.now();
 
-            // Update UI based on state
             this._handleStateChange(newState, reason);
         }
     }
@@ -1232,7 +1180,6 @@ export class ApiKeyHeader extends LitElement {
 
                 this._updateConnectionState('connected', 'Status updated successfully');
 
-                // Load model suggestions if Ollama is running
                 if (result.running) {
                     await this.loadModelSuggestions();
                 }
@@ -1256,7 +1203,6 @@ export class ApiKeyHeader extends LitElement {
             if (result?.success) {
                 this.modelSuggestions = result.suggestions || [];
 
-                // 기본 모델 선택 (설치된 모델 중 첫 번째)
                 if (!this.selectedLlmModel && this.modelSuggestions.length > 0) {
                     const installedModel = this.modelSuggestions.find(m => m.status === 'installed');
                     if (installedModel) {
@@ -1311,7 +1257,6 @@ export class ApiKeyHeader extends LitElement {
         this.requestUpdate();
 
         const progressHandler = (event, data) => {
-            // 통합 LocalAI 이벤트에서 Ollama 진행률만 처리
             if (data.service !== 'ollama') return;
             
             let baseProgress = 0;
@@ -1357,21 +1302,19 @@ export class ApiKeyHeader extends LitElement {
                 console.log('[ApiKeyHeader] Operation timeout, checking status manually...');
                 await this._handleOllamaSetupCompletion(true);
             }
-        }, 15000); // 15 second timeout
+        }, 15000);
 
         const completionHandler = async (event, data) => {
-            // 통합 LocalAI 이벤트에서 Ollama 완료만 처리
             if (data.service !== 'ollama') return;
             if (operationCompleted) return;
             operationCompleted = true;
             clearTimeout(completionTimeout);
 
             window.api.apiKeyHeader.removeOnLocalAIProgress(progressHandler);
-            // installation-complete 이벤트는 성공을 의미
+            // The complete event is only sent on success.
             await this._handleOllamaSetupCompletion(true);
         };
 
-        // 통합 LocalAI 이벤트 사용
         window.api.apiKeyHeader.onLocalAIComplete(completionHandler);
         window.api.apiKeyHeader.onLocalAIProgress(progressHandler);
 
@@ -1424,7 +1367,6 @@ export class ApiKeyHeader extends LitElement {
         this.selectedLlmModel = modelName;
         this.clearMessages();
 
-        // Save to user history if it's a valid model name
         if (modelName && modelName.length > 2) {
             this.saveToUserHistory(modelName);
         }
@@ -1437,7 +1379,6 @@ export class ApiKeyHeader extends LitElement {
             e.preventDefault();
             console.log(`[ApiKeyHeader] Enter pressed, installing model: ${this.selectedLlmModel}`);
 
-            // Check if Ollama is ready first
             const ollamaReady = await this.ensureOllamaReady();
             if (!ollamaReady) {
                 this.llmError = '*Failed to setup Ollama';
@@ -1446,7 +1387,6 @@ export class ApiKeyHeader extends LitElement {
                 return;
             }
 
-            // Install the model
             await this.installModel(this.selectedLlmModel);
         }
     }
@@ -1466,16 +1406,10 @@ export class ApiKeyHeader extends LitElement {
     saveToUserHistory(modelName) {
         if (!modelName || !modelName.trim()) return;
 
-        // Remove if already exists (to move to front)
         this.userModelHistory = this.userModelHistory.filter(m => m !== modelName);
-
-        // Add to front
         this.userModelHistory.unshift(modelName);
-
-        // Keep only last 20 entries
         this.userModelHistory = this.userModelHistory.slice(0, 20);
 
-        // Save to localStorage
         try {
             localStorage.setItem('ollama-model-history', JSON.stringify(this.userModelHistory));
         } catch (error) {
@@ -1486,7 +1420,6 @@ export class ApiKeyHeader extends LitElement {
     getCombinedModelSuggestions() {
         const combined = [];
 
-        // Add installed models first (from Ollama CLI)
         for (const model of this.modelSuggestions) {
             combined.push({
                 name: model.name,
@@ -1496,7 +1429,6 @@ export class ApiKeyHeader extends LitElement {
             });
         }
 
-        // Add user history models that aren't already installed
         const installedNames = this.modelSuggestions.map(m => m.name);
         for (const modelName of this.userModelHistory) {
             if (!installedNames.includes(modelName)) {
@@ -1528,7 +1460,6 @@ export class ApiKeyHeader extends LitElement {
         try {
             console.log(`[ApiKeyHeader] Installing model via Ollama REST API: ${modelName}`);
 
-            // Create robust progress handler with timeout protection
             progressHandler = (event, data) => {
                 if (data.service === 'ollama' && data.model === modelName && !this._isOperationCancelled(modelName)) {
                     const progress = Math.round(Math.max(0, Math.min(100, data.progress || 0)));
@@ -1541,10 +1472,8 @@ export class ApiKeyHeader extends LitElement {
                 }
             };
 
-            // Set up progress tracking - 통합 LocalAI 이벤트 사용
             window.api.apiKeyHeader.onLocalAIProgress(progressHandler);
 
-            // Execute the model pull with timeout
             const installPromise = window.api.apiKeyHeader.pullOllamaModel(modelName);
             const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Installation timeout after 10 minutes')), 600000));
 
@@ -1555,10 +1484,9 @@ export class ApiKeyHeader extends LitElement {
                 this.installProgress = 100;
                 this.requestUpdate();
 
-                // Brief pause to show completion
+                // Brief pause so the 100% is visible.
                 await new Promise(resolve => setTimeout(resolve, 300));
 
-                // Refresh status and show success
                 await this.refreshOllamaStatus();
                 this.successMessage = `✓ ${modelName} ready`;
                 this.messageTimestamp = Date.now();
@@ -1570,7 +1498,6 @@ export class ApiKeyHeader extends LitElement {
             this.llmError = `*Failed: ${error.message}`;
             this.messageTimestamp = Date.now();
         } finally {
-            // Comprehensive cleanup
             if (progressHandler) {
                 window.api.apiKeyHeader.removeOnLocalAIProgress(progressHandler);
             }
@@ -1593,7 +1520,6 @@ export class ApiKeyHeader extends LitElement {
 
         console.log(`[ApiKeyHeader] Starting Whisper model download: ${modelId}`);
 
-        // Mark as installing
         this.whisperInstallingModels = { ...this.whisperInstallingModels, [modelId]: 0 };
         this.clearMessages();
         this.requestUpdate();
@@ -1602,7 +1528,6 @@ export class ApiKeyHeader extends LitElement {
         let progressHandler = null;
 
         try {
-            // Set up robust progress listener - 통합 LocalAI 이벤트 사용
             progressHandler = (event, data) => {
                 if (data.service === 'whisper' && data.model === modelId) {
                     const cleanProgress = Math.round(Math.max(0, Math.min(100, data.progress || 0)));
@@ -1614,7 +1539,6 @@ export class ApiKeyHeader extends LitElement {
 
             window.api.apiKeyHeader.onLocalAIProgress(progressHandler);
 
-            // Start download with timeout protection
             const downloadPromise = window.api.apiKeyHeader.downloadWhisperModel(modelId);
             const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('Download timeout after 10 minutes')), 600000));
 
@@ -1625,7 +1549,6 @@ export class ApiKeyHeader extends LitElement {
                 this.messageTimestamp = Date.now();
                 console.log(`[ApiKeyHeader] Whisper model ${modelId} downloaded successfully`);
 
-                // Auto-select the downloaded model
                 this.selectedSttModel = modelId;
             } else {
                 this.sttError = `*Failed to download ${modelId}: ${result?.error || 'Unknown error'}`;
@@ -1637,7 +1560,6 @@ export class ApiKeyHeader extends LitElement {
             this.sttError = `*Error downloading ${modelId}: ${error.message}`;
             this.messageTimestamp = Date.now();
         } finally {
-            // Cleanup
             if (progressHandler) {
                 window.api.apiKeyHeader.removeOnLocalAIProgress(progressHandler);
             }
@@ -1676,13 +1598,11 @@ export class ApiKeyHeader extends LitElement {
         }
     }
 
-    //////// after_modelStateService ////////
     async handleSttModelChange(e) {
         const modelId = e.target.value;
         this.selectedSttModel = modelId;
 
         if (modelId && this.sttProvider === 'whisper') {
-            // Check if model needs to be downloaded
             const isInstalling = this.whisperInstallingModels[modelId] !== undefined;
             if (!isInstalling) {
                 console.log(`[ApiKeyHeader] Auto-installing Whisper model: ${modelId}`);
@@ -1708,10 +1628,8 @@ export class ApiKeyHeader extends LitElement {
         }
 
         try {
-            // Handle LLM provider
             let llmResult;
             if (this.llmProvider === 'ollama') {
-                // For Ollama ensure it's ready and validate model selection
                 if (!this.selectedLlmModel?.trim()) {
                     throw new Error('Please enter an Ollama model name');
                 }
@@ -1721,28 +1639,24 @@ export class ApiKeyHeader extends LitElement {
                     throw new Error('Failed to setup Ollama');
                 }
 
-                // Check if model is installed, if not install it
                 const selectedModel = this.getCombinedModelSuggestions().find(m => m.name === this.selectedLlmModel);
                 if (!selectedModel || selectedModel.status !== 'installed') {
                     console.log(`[ApiKeyHeader] Installing model ${this.selectedLlmModel}...`);
                     await this.installModel(this.selectedLlmModel);
                 }
 
-                // Validate Ollama is working
                 llmResult = await window.api.apiKeyHeader.validateKey({
                     provider: 'ollama',
                     key: 'local',
                 });
 
                 if (llmResult.success) {
-                    // Set the selected model
                     await window.api.apiKeyHeader.setSelectedModel({
                         type: 'llm',
                         modelId: this.selectedLlmModel,
                     });
                 }
             } else {
-                // For other providers, validate API key
                 if (!this.llmApiKey.trim()) {
                     throw new Error('Please enter LLM API key');
                 }
@@ -1764,27 +1678,24 @@ export class ApiKeyHeader extends LitElement {
                 }
             }
 
-            // Handle STT provider
             let sttResult;
             if (this.sttProvider === 'ollama') {
-                // Ollama doesn't support STT yet, so skip or use same as LLM validation
+                // Ollama has no STT; there is nothing to validate.
                 sttResult = { success: true };
             } else if (this.sttProvider === 'whisper') {
-                // For Whisper, just validate it's enabled (model download already handled in handleSttModelChange)
+                // The model was already downloaded when it was selected.
                 sttResult = await window.api.apiKeyHeader.validateKey({
                     provider: 'whisper',
                     key: 'local',
                 });
 
                 if (sttResult.success && this.selectedSttModel) {
-                    // Set the selected model
                     await window.api.apiKeyHeader.setSelectedModel({
                         type: 'stt',
                         modelId: this.selectedSttModel,
                     });
                 }
             } else {
-                // For other providers, validate API key
                 if (!this.sttApiKey.trim()) {
                     throw new Error('Please enter STT API key');
                 }
@@ -1809,7 +1720,7 @@ export class ApiKeyHeader extends LitElement {
             if (llmResult.success && sttResult.success) {
                 console.log('[ApiKeyHeader] handleSubmit: Validation successful.');
                 
-                // Force refresh the model state to ensure areProvidersConfigured returns true
+                // Leave this screen only once areProvidersConfigured() agrees.
                 setTimeout(async () => {
                     const isConfigured = await window.api.apiKeyHeader.areProvidersConfigured();
                     console.log('[ApiKeyHeader] Post-validation providers configured check:', isConfigured);
@@ -1838,21 +1749,20 @@ export class ApiKeyHeader extends LitElement {
         this.isLoading = false;
         this.requestUpdate();
     }
-    //////// after_modelStateService ////////
 
-
-    ////TODO: 뭔가 넘어가는 애니메이션 로직에 문제가 있음
+    // TODO (upstream): the slide-out transition logic is flaky.
     startSlideOutAnimation() {
         console.log('[ApiKeyHeader] startSlideOutAnimation: Starting slide out animation.');
         this.classList.add('sliding-out');
-        
-        // Fallback: if animation doesn't trigger animationend event, force transition
+
+        // Fallback in case animationend never fires. At 1 ms it runs before the
+        // 300 ms slideOut ends, so the animation is effectively skipped.
         setTimeout(() => {
             if (this.classList.contains('sliding-out')) {
                 console.log('[ApiKeyHeader] Animation fallback triggered - forcing transition');
                 this.handleAnimationEnd({ target: this, animationName: 'slideOut' });
             }
-        }, 1); // Wait a bit longer than animation duration
+        }, 1);
     }
 
     handleClose() {
@@ -1861,7 +1771,6 @@ export class ApiKeyHeader extends LitElement {
         }
     }
 
-    //////// after_modelStateService ////////
     handleAnimationEnd(e) {
         if (e.target !== this || !this.classList.contains('sliding-out')) return;
         this.classList.remove('sliding-out');
@@ -1889,7 +1798,6 @@ export class ApiKeyHeader extends LitElement {
             .catch(error => console.error('[ApiKeyHeader] handleAnimationEnd: Error checking providers:', error))
             .finally(() => this.stateUpdateCallback());
     }
-    //////// after_modelStateService ////////
 
     connectedCallback() {
         super.connectedCallback();
@@ -1898,7 +1806,6 @@ export class ApiKeyHeader extends LitElement {
 
     handleMessageFadeEnd(e) {
         if (e.animationName === 'fadeOut') {
-            // Clear the message that finished fading
             if (e.target.classList.contains('error-message')) {
                 this.errorMessage = '';
             } else if (e.target.classList.contains('success-message')) {
@@ -1913,30 +1820,24 @@ export class ApiKeyHeader extends LitElement {
         super.disconnectedCallback();
         this.removeEventListener('animationend', this.handleAnimationEnd);
 
-        // Professional cleanup of all resources
         this._performCompleteCleanup();
     }
 
     _performCompleteCleanup() {
         console.log('[ApiKeyHeader] Performing complete cleanup');
 
-        // Stop health monitoring
         this._stopHealthMonitoring();
 
-        // Cancel all active operations
         this._cancelAllActiveOperations();
 
-        // Cancel any ongoing installations when component is destroyed
         if (this.installingModel) {
             this.progressTracker.cancelInstallation(this.installingModel);
         }
 
-        // Cleanup event listeners
         if (window.api?.apiKeyHeader) {
             window.api.apiKeyHeader.removeAllListeners();
         }
 
-        // Cancel any ongoing downloads
         const downloadingModels = Object.keys(this.whisperInstallingModels);
         if (downloadingModels.length > 0) {
             console.log(`[ApiKeyHeader] Cancelling ${downloadingModels.length} ongoing Whisper downloads`);
@@ -1945,16 +1846,12 @@ export class ApiKeyHeader extends LitElement {
             });
         }
 
-        // Reset state
         this.connectionState = 'disconnected';
         this.retryCount = 0;
 
         console.log('[ApiKeyHeader] Cleanup completed');
     }
 
-    /**
-     * State machine-based Ollama UI rendering
-     */
     _renderOllamaStateUI() {
         const state = this._getOllamaUIState();
 
@@ -1977,7 +1874,6 @@ export class ApiKeyHeader extends LitElement {
     }
 
     _getOllamaUIState() {
-        // State determination logic
         if (this.connectionState === 'connecting') {
             return { type: 'connecting', message: this.installingModel || 'Connecting to Ollama...' };
         }
@@ -2024,7 +1920,6 @@ export class ApiKeyHeader extends LitElement {
 
     _renderReadyState() {
         return html`
-            <!-- Model Input with Autocomplete -->
             <input
                 type="text"
                 class="api-input"
@@ -2046,7 +1941,6 @@ export class ApiKeyHeader extends LitElement {
                 )}
             </datalist>
 
-            <!-- Show model status -->
             ${this.renderModelStatus()}
             ${this.installingModel && !this.installingModel.includes('Ollama')
                 ? html`
@@ -2147,7 +2041,6 @@ export class ApiKeyHeader extends LitElement {
                     <div class="title">Use Personal API keys</div>
                 </div>
 
-                <!-- LLM Section -->
                 <div class="section">
                     <div class="row">
                         <div class="label">1. Select LLM Provider</div>
@@ -2188,7 +2081,6 @@ export class ApiKeyHeader extends LitElement {
                     </div>
                 </div>
 
-                <!-- STT Section -->
                 <div class="section">
                     <div class="row">
                         <div class="label">3. Select STT Provider</div>

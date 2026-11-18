@@ -1,7 +1,6 @@
-// Runs node:test inside Electron's bundled Node (ELECTRON_RUN_AS_NODE=1).
-// Native modules (better-sqlite3) are rebuilt for Electron's ABI by
-// `postinstall`, so the system `node` can't load them; Electron's Node can,
-// and it matches the runtime the app actually ships with.
+// Runs node:test inside Electron's bundled Node (ELECTRON_RUN_AS_NODE=1):
+// native modules are rebuilt for Electron's ABI by `postinstall`, so the
+// system `node` can't load them.
 //
 // Usage: npm test                      -> all test/**/*.test.js
 //        npm test -- test/whisper.test.js

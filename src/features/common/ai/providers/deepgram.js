@@ -1,15 +1,9 @@
-// providers/deepgram.js
-
 const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
 const WebSocket = require('ws');
 
-/**
- * Deepgram Provider 클래스. API 키 유효성 검사를 담당합니다.
- */
 class DeepgramProvider {
     /**
-     * Deepgram API 키의 유효성을 검사합니다.
-     * @param {string} key - 검사할 Deepgram API 키
+     * @param {string} key
      * @returns {Promise<{success: boolean, error?: string}>}
      */
     static async validateApiKey(key) {
@@ -17,7 +11,7 @@ class DeepgramProvider {
             return { success: false, error: 'Invalid Deepgram API key format.' };
         }
         try {
-            // ✨ 변경점: SDK 대신 직접 fetch로 API를 호출하여 안정성 확보 (openai.js 방식)
+            // Plain fetch instead of the SDK: the SDK call was unreliable here.
             const response = await fetch('https://api.deepgram.com/v1/projects', {
                 headers: { 'Authorization': `Token ${key}` }
             });
@@ -93,7 +87,6 @@ function createSTT({
     });
   }
 
-// ... (LLM 관련 Placeholder 함수들은 그대로 유지) ...
 function createLLM(opts) {
   console.warn("[Deepgram] LLM not supported.");
   return { generateContent: async () => { throw new Error("Deepgram does not support LLM functionality."); } };

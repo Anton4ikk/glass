@@ -18,7 +18,7 @@ beforeEach(async () => {
     await sqliteClient.initTables();
     installed = new Set();
     whisperService.getInstalledModels = async () =>
-        ['whisper-tiny', 'whisper-base', 'whisper-small', 'whisper-medium']
+        ['whisper-tiny', 'whisper-base', 'whisper-small', 'whisper-medium', 'whisper-large-v3-turbo']
             .map(id => ({ id, installed: installed.has(id) }));
 });
 

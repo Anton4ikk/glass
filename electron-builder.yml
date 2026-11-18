@@ -64,8 +64,7 @@ mac:
         LSUIElement: true
     entitlements: entitlements.plist
     entitlementsInherit: entitlements.plist
+    # Only the .app: scripts/install-to-desktop.js moves it to ~/Desktop.
     target:
-      - target: dmg
-        arch: universal
-      - target: zip
+      - target: dir
         arch: universal

@@ -17,14 +17,12 @@ function getAll() {
 }
 
 function upsert(provider, settings) {
-    // Validate: prevent direct setting of active status
     if (settings.is_active_llm || settings.is_active_stt) {
         console.warn('[ProviderSettings] Warning: is_active_llm/is_active_stt should not be set directly. Use setActiveProvider() instead.');
     }
     
     const db = sqliteClient.getDb();
-    
-    // Use SQLite's UPSERT syntax (INSERT ... ON CONFLICT ... DO UPDATE)
+
     const stmt = db.prepare(`
         INSERT INTO provider_settings (provider, api_key, selected_llm_model, selected_stt_model, is_active_llm, is_active_stt, created_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -65,7 +63,6 @@ function removeAll() {
     return { changes: result.changes };
 }
 
-// Get active provider for a specific type (llm or stt)
 function getActiveProvider(type) {
     const db = sqliteClient.getDb();
     const column = type === 'llm' ? 'is_active_llm' : 'is_active_stt';
@@ -75,18 +72,15 @@ function getActiveProvider(type) {
     return result;
 }
 
-// Set active provider for a specific type
 function setActiveProvider(provider, type) {
     const db = sqliteClient.getDb();
     const column = type === 'llm' ? 'is_active_llm' : 'is_active_stt';
-    
-    // Start transaction to ensure only one provider is active
+
+    // One transaction, so at most one provider is ever active per type.
     db.transaction(() => {
-        // First, deactivate all providers for this type
         const deactivateStmt = db.prepare(`UPDATE provider_settings SET ${column} = 0`);
         deactivateStmt.run();
-        
-        // Then activate the specified provider
+
         if (provider) {
             const activateStmt = db.prepare(`UPDATE provider_settings SET ${column} = 1 WHERE provider = ?`);
             activateStmt.run(provider);
@@ -96,7 +90,6 @@ function setActiveProvider(provider, type) {
     return { success: true };
 }
 
-// Get all active settings (both llm and stt)
 function getActiveSettings() {
     const db = sqliteClient.getDb();
     const stmt = db.prepare(`
@@ -105,8 +98,7 @@ function getActiveSettings() {
         ORDER BY provider
     `);
     const results = stmt.all();
-    
-    // Organize by type
+
     const activeSettings = {
         llm: null,
         stt: null

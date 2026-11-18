@@ -122,7 +122,6 @@ function setSttLanguage(uid, language) {
     try {
         const result = db.prepare('UPDATE users SET stt_language = ? WHERE uid = ?').run(safeLanguage, targetUid);
 
-        // If no rows were updated, the user might not exist, so create them
         if (result.changes === 0) {
             const now = Math.floor(Date.now() / 1000);
             const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, stt_language) VALUES (?, ?, ?, ?, ?)');
@@ -159,7 +158,6 @@ function setAskThinking(uid, enabled) {
     try {
         const result = db.prepare('UPDATE users SET ask_thinking = ? WHERE uid = ?').run(value, targetUid);
 
-        // If no rows were updated, the user might not exist, so create them
         if (result.changes === 0) {
             const now = Math.floor(Date.now() / 1000);
             const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, ask_thinking) VALUES (?, ?, ?, ?, ?)');
@@ -194,7 +192,6 @@ function setAboutMe(uid, text) {
     try {
         const result = db.prepare('UPDATE users SET about_me = ? WHERE uid = ?').run(value, targetUid);
 
-        // If no rows were updated, the user might not exist, so create them
         if (result.changes === 0) {
             const now = Math.floor(Date.now() / 1000);
             const stmt = db.prepare('INSERT OR REPLACE INTO users (uid, display_name, email, created_at, about_me) VALUES (?, ?, ?, ?, ?)');

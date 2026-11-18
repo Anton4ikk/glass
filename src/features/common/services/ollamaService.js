@@ -10,6 +10,7 @@ const { app } = require('electron');
 const { spawnAsync } = require('../utils/spawnHelper');
 const { DOWNLOAD_CHECKSUMS } = require('../config/checksums');
 const ollamaModelRepository = require('../repositories/ollamaModel');
+const { NUM_CTX } = require('../ai/providers/ollama');
 
 const execAsync = promisify(exec);
 
@@ -18,45 +19,36 @@ class OllamaService extends EventEmitter {
         super();
         this.serviceName = 'OllamaService';
         this.baseUrl = 'http://localhost:11434';
-        
-        // 단순화된 상태 관리
+
         this.installState = {
             isInstalled: false,
             isInstalling: false,
             progress: 0
         };
-        
-        // 단순화된 요청 관리 (복잡한 큐 제거)
-        this.requestTimeout = 30000; // 30초 타임아웃
-        
-        // 모델 상태
+
+        this.requestTimeout = 30000;
+
         this.installedModels = new Map();
         this.modelWarmupStatus = new Map();
-        
-        // 체크포인트 시스템 (롤백용)
+
+        // Rollback points for a failed install.
         this.installCheckpoints = [];
-        
-        // 설치 진행률 관리
+
         this.installationProgress = new Map();
-        
-        // 워밍 관련 (기존 유지)
+
         this.warmingModels = new Map();
         this.warmedModels = new Set();
         this.lastWarmUpAttempt = new Map();
-        this.warmupTimeout = 120000; // 120s for model warmup
-        
-        // 상태 동기화
+        this.warmupTimeout = 120000;
+
         this._lastState = null;
         this._syncInterval = null;
         this._lastLoadedModels = [];
         this.modelLoadStatus = new Map();
-        
-        // 서비스 종료 상태 추적
+
         this.isShuttingDown = false;
     }
 
-
-    // Base class methods integration
     getPlatform() {
         return process.platform;
     }
@@ -123,9 +115,9 @@ class OllamaService extends EventEmitter {
     }
 
     /**
-     * fetch against the local Ollama API with a per-request timeout. Ollama
-     * serves concurrent requests itself; the old one-at-a-time lock woke all
-     * waiters at once and handed them the previous request's error.
+     * fetch against the local Ollama API with a per-request timeout. No local
+     * queue: Ollama serves concurrent requests itself, and the old lock handed
+     * waiters the previous request's error.
      */
     async makeRequest(endpoint, { timeout = this.requestTimeout, ...options } = {}) {
         if (this.isShuttingDown) {
@@ -164,8 +156,6 @@ class OllamaService extends EventEmitter {
 
     async isServiceRunning() {
         try {
-            // Use /api/ps to check if service is running
-            // This is more reliable than /api/tags which may not show models not in memory
             const response = await this.makeRequest('/api/ps', {
                 method: 'GET'
             });
@@ -178,7 +168,6 @@ class OllamaService extends EventEmitter {
     }
 
     async startService() {
-        // 서비스 시작 시 종료 플래그 리셋
         this.isShuttingDown = false;
         
         const platform = this.getPlatform();
@@ -216,7 +205,6 @@ class OllamaService extends EventEmitter {
         return await this.shutdown();
     }
 
-    // Comprehensive health check using multiple endpoints
     async healthCheck() {
         try {
             const checks = {
@@ -225,8 +213,7 @@ class OllamaService extends EventEmitter {
                 modelsAccessible: false,
                 memoryStatus: false
             };
-            
-            // 1. Basic service check with /api/ps
+
             try {
                 const psResponse = await this.makeRequest('/api/ps', { method: 'GET' });
                 checks.serviceRunning = psResponse.ok;
@@ -234,16 +221,14 @@ class OllamaService extends EventEmitter {
             } catch (error) {
                 console.log('[OllamaService] /api/ps check failed:', error.message);
             }
-            
-            // 2. Check if API is responsive with root endpoint
+
             try {
                 const rootResponse = await this.makeRequest('/', { method: 'GET' });
                 checks.apiResponsive = rootResponse.ok;
             } catch (error) {
                 console.log('[OllamaService] Root endpoint check failed:', error.message);
             }
-            
-            // 3. Check if models endpoint is accessible
+
             try {
                 const tagsResponse = await this.makeRequest('/api/tags', { method: 'GET' });
                 checks.modelsAccessible = tagsResponse.ok;
@@ -269,7 +254,6 @@ class OllamaService extends EventEmitter {
     }
 
     async getInstalledModels() {
-        // 서비스 종료 중이면 빈 배열 반환
         if (this.isShuttingDown) {
             console.log('[OllamaService] Service is shutting down, returning empty models list');
             return [];
@@ -288,9 +272,8 @@ class OllamaService extends EventEmitter {
         }
     }
 
-    // Get models currently loaded in memory using /api/ps
+    // Models currently loaded in memory (/api/ps), as opposed to installed (/api/tags).
     async getLoadedModels() {
-        // 서비스 종료 중이면 빈 배열 반환
         if (this.isShuttingDown) {
             console.log('[OllamaService] Service is shutting down, returning empty loaded models list');
             return [];
@@ -307,15 +290,13 @@ class OllamaService extends EventEmitter {
             }
             
             const data = await response.json();
-            // Extract model names from running processes
             return (data.models || []).map(m => m.name);
         } catch (error) {
             console.error('[OllamaService] Error getting loaded models:', error);
             return [];
         }
     }
-    
-    // Get detailed memory info for loaded models
+
     async getLoadedModelsWithMemoryInfo() {
         try {
             const response = await this.makeRequest('/api/ps', {
@@ -327,15 +308,13 @@ class OllamaService extends EventEmitter {
             }
             
             const data = await response.json();
-            // Return full model info including memory usage
             return data.models || [];
         } catch (error) {
             console.error('[OllamaService] Error getting loaded models info:', error);
             return [];
         }
     }
-    
-    // Check if a specific model is loaded in memory
+
     async isModelLoaded(modelName) {
         const loadedModels = await this.getLoadedModels();
         return loadedModels.includes(modelName);
@@ -345,15 +324,15 @@ class OllamaService extends EventEmitter {
         try {
             const { stdout } = await spawnAsync(this.getOllamaCliPath(), ['list']);
             const lines = stdout.split('\n').filter(line => line.trim());
-            
+
             // Skip header line (NAME, ID, SIZE, MODIFIED)
             const modelLines = lines.slice(1);
-            
+
             const models = [];
             for (const line of modelLines) {
                 if (!line.trim()) continue;
-                
-                // Parse line: "model:tag    model_id    size    modified_time"
+
+                // "model:tag    model_id    size    modified_time"
                 const parts = line.split(/\s+/);
                 if (parts.length >= 3) {
                     models.push({
@@ -368,7 +347,6 @@ class OllamaService extends EventEmitter {
             return models;
         } catch (error) {
             console.log('[OllamaService] Failed to get installed models via CLI, falling back to API');
-            // Fallback to API if CLI fails
             const apiModels = await this.getInstalledModels();
             return apiModels.map(model => ({
                 name: model.name,
@@ -381,11 +359,8 @@ class OllamaService extends EventEmitter {
 
     async getModelSuggestions() {
         try {
-            // Get actually installed models
             const installedModels = await this.getInstalledModelsList();
-            
-            // Get user input history from storage (we'll implement this in the frontend)
-            // For now, just return installed models
+
             return installedModels;
         } catch (error) {
             console.error('[OllamaService] Failed to get model suggestions:', error);
@@ -404,10 +379,9 @@ class OllamaService extends EventEmitter {
         }
 
         console.log(`[OllamaService] Starting to pull model: ${modelName} via API`);
-        
-        // Emit progress event - LocalAIManager가 처리
-        this.emit('install-progress', { 
-            model: modelName, 
+
+        this.emit('install-progress', {
+            model: modelName,
             progress: 0,
             status: 'starting'
         });
@@ -426,18 +400,16 @@ class OllamaService extends EventEmitter {
                 throw new Error(`Pull API failed: ${response.status} ${response.statusText}`);
             }
 
-            // Handle Node.js streaming response
             return new Promise((resolve, reject) => {
                 let buffer = '';
-                
+
                 response.body.on('data', (chunk) => {
                     buffer += chunk.toString();
                     const lines = buffer.split('\n');
-                    
+
                     // Keep incomplete line in buffer
                     buffer = lines.pop() || '';
-                    
-                    // Process complete lines
+
                     for (const line of lines) {
                         if (!line.trim()) continue;
                         
@@ -447,7 +419,6 @@ class OllamaService extends EventEmitter {
                             
                             if (progress !== null) {
                                 this.setInstallProgress(modelName, progress);
-                                // Emit progress event - LocalAIManager가 처리
                                 this.emit('install-progress', { 
                                     model: modelName, 
                                     progress,
@@ -456,7 +427,6 @@ class OllamaService extends EventEmitter {
                                 console.log(`[OllamaService] API Progress: ${progress}% for ${modelName} (${data.status || 'downloading'})`);
                             }
 
-                            // Handle completion
                             if (data.status === 'success') {
                                 console.log(`[OllamaService] Successfully pulled model: ${modelName}`);
                                 this.emit('model-pull-complete', { model: modelName });
@@ -471,7 +441,6 @@ class OllamaService extends EventEmitter {
                 });
 
                 response.body.on('end', () => {
-                    // Process any remaining data in buffer
                     if (buffer.trim()) {
                         try {
                             const data = JSON.parse(buffer);
@@ -501,18 +470,16 @@ class OllamaService extends EventEmitter {
     }
 
     _parseOllamaPullProgress(data, modelName) {
-        // Handle Ollama API response format
         if (data.status === 'success') {
             return 100;
         }
 
-        // Handle downloading progress
         if (data.total && data.completed !== undefined) {
             const progress = Math.round((data.completed / data.total) * 100);
             return Math.min(progress, 99); // Don't show 100% until success
         }
 
-        // Handle status-based progress
+        // Statuses without byte counts get fixed milestones.
         const statusProgress = {
             'pulling manifest': 5,
             'downloading': 10,
@@ -698,7 +665,6 @@ class OllamaService extends EventEmitter {
 
         try {
 
-            // 체크포인트 저장
             await this.saveCheckpoint('pre-install');
 
             console.log('[OllamaService] Step 1: Downloading Ollama DMG...');
@@ -735,7 +701,7 @@ class OllamaService extends EventEmitter {
             } catch (linkError) {
                 console.error('[OllamaService] CLI symlink creation failed:', linkError.message);
                 onProgress?.({ stage: 'linking', message: 'Shortcut creation failed (permissions?).', progress: 100 });
-                // Not throwing an error, as the app might still work
+                // Non-fatal: the app calls the CLI by its full path inside Ollama.app.
             }
             
             console.log('[OllamaService] Step 5: Cleanup...');
@@ -752,7 +718,6 @@ class OllamaService extends EventEmitter {
             return true;
         } catch (error) {
             console.error('[OllamaService] macOS installation failed:', error);
-            // 설치 실패 시 정리
             await fs.unlink(dmgPath).catch(() => {});
             throw new Error(`Failed to install Ollama on macOS: ${error.message}`);
         }
@@ -807,7 +772,6 @@ class OllamaService extends EventEmitter {
         throw new Error('Manual installation required on Linux. Please visit https://ollama.com/download/linux');
     }
 
-    // === 체크포인트 & 롤백 시스템 ===
     async saveCheckpoint(name) {
         this.installCheckpoints.push({
             name,
@@ -820,7 +784,6 @@ class OllamaService extends EventEmitter {
         const checkpoint = this.installCheckpoints.pop();
         if (checkpoint) {
             console.log(`[OllamaService] Rolling back to checkpoint: ${checkpoint.name}`);
-            // 플랫폼별 롤백 로직 실행
             await this._executeRollback(checkpoint);
         }
     }
@@ -829,19 +792,15 @@ class OllamaService extends EventEmitter {
         const platform = this.getPlatform();
         
         if (platform === 'darwin' && checkpoint.name === 'post-install') {
-            // macOS 롤백
             await fs.rm('/Applications/Ollama.app', { recursive: true, force: true }).catch(() => {});
         } else if (platform === 'win32') {
-            // Windows 롤백 (레지스트리 등)
-            // TODO: Windows 롤백 구현
+            // TODO: Windows rollback (uninstaller / registry) is not implemented.
         }
         
         this.installState = checkpoint.state;
     }
 
-    // === 상태 동기화 (내부 처리) ===
     async syncState() {
-        // 서비스 종료 중이면 스킵
         if (this.isShuttingDown) {
             console.log('[OllamaService] Service is shutting down, skipping state sync');
             return this.installState;
@@ -852,13 +811,11 @@ class OllamaService extends EventEmitter {
             const isRunning = await this.isServiceRunning();
             const models = isRunning && !this.isShuttingDown ? await this.getInstalledModels() : [];
             const loadedModels = isRunning && !this.isShuttingDown ? await this.getLoadedModels() : [];
-            
-            // 상태 업데이트
+
             this.installState.isInstalled = isInstalled;
             this.installState.isRunning = isRunning;
             this.installState.lastSync = Date.now();
-            
-            // 메모리 로드 상태 추적
+
             const previousLoadedModels = this._lastLoadedModels || [];
             const loadedChanged = loadedModels.length !== previousLoadedModels.length || 
                                !loadedModels.every(m => previousLoadedModels.includes(m));
@@ -866,8 +823,8 @@ class OllamaService extends EventEmitter {
             if (loadedChanged) {
                 console.log(`[OllamaService] Loaded models changed: ${loadedModels.join(', ')}`);
                 this._lastLoadedModels = loadedModels;
-                
-                // 메모리에서 언로드된 모델의 warmed 상태 제거
+
+                // Ollama evicts idle models; an unloaded model is cold again.
                 for (const modelName of this.warmedModels) {
                     if (!loadedModels.includes(modelName)) {
                         this.warmedModels.delete(modelName);
@@ -875,16 +832,14 @@ class OllamaService extends EventEmitter {
                     }
                 }
             }
-            
-            // 모델 상태 DB 업데이트
+
             if (isRunning && models.length > 0) {
                 for (const model of models) {
                     try {
                         const isLoaded = loadedModels.includes(model.name);
-                        // DB에는 installed 상태만 저장, loaded 상태는 메모리에서 관리
+                        // Only "installed" is persisted; "loaded" is tracked in memory.
                         await ollamaModelRepository.updateInstallStatus(model.name, true, false);
-                        
-                        // 로드 상태를 인스턴스 변수에 저장
+
                         if (!this.modelLoadStatus) {
                             this.modelLoadStatus = new Map();
                         }
@@ -894,11 +849,10 @@ class OllamaService extends EventEmitter {
                     }
                 }
 
-                // Forget models that Ollama no longer has. Guarded by the
-                // models.length > 0 above on purpose: getInstalledModels()
-                // returns [] for a failed request just as it does for an empty
-                // library, so pruning on an empty list would wipe the table
-                // every time Ollama is briefly unreachable.
+                // Forget models Ollama no longer has. Guarded by models.length > 0
+                // on purpose: getInstalledModels() returns [] on a failed request
+                // too, so pruning on [] would wipe the table whenever Ollama is
+                // briefly unreachable.
                 try {
                     const pruned = ollamaModelRepository.pruneMissingModels(models.map(m => m.name));
                     if (pruned.changes > 0) {
@@ -908,12 +862,10 @@ class OllamaService extends EventEmitter {
                     console.warn('[OllamaService] Failed to prune stale models from DB:', dbError);
                 }
             }
-            
-            // UI 알림 (상태 변경 시만)
-            if (this._lastState?.isRunning !== isRunning || 
+
+            if (this._lastState?.isRunning !== isRunning ||
                 this._lastState?.isInstalled !== isInstalled ||
                 loadedChanged) {
-                // Emit state change event - LocalAIManager가 처리
                 this.emit('state-changed', {
                     installed: isInstalled,
                     running: isRunning,
@@ -935,13 +887,12 @@ class OllamaService extends EventEmitter {
         }
     }
 
-    // 주기적 동기화 시작
     startPeriodicSync() {
         if (this._syncInterval) return;
-        
+
         this._syncInterval = setInterval(() => {
             this.syncState();
-        }, 30000); // 30초마다
+        }, 30000);
     }
 
     stopPeriodicSync() {
@@ -957,19 +908,16 @@ class OllamaService extends EventEmitter {
             return false;
         }
 
-        // Check if already warmed (and not forcing refresh)
         if (!forceRefresh && this.warmedModels.has(modelName)) {
             console.log(`[OllamaService] Model ${modelName} already warmed up, skipping`);
             return true;
         }
 
-        // Check if currently warming - return existing Promise
         if (this.warmingModels.has(modelName)) {
             console.log(`[OllamaService] Model ${modelName} is already warming up, joining existing operation`);
             return await this.warmingModels.get(modelName);
         }
 
-        // Check rate limiting (prevent too frequent attempts)
         const lastAttempt = this.lastWarmUpAttempt.get(modelName);
         const now = Date.now();
         if (lastAttempt && (now - lastAttempt) < 5000) { // 5 second cooldown
@@ -977,7 +925,6 @@ class OllamaService extends EventEmitter {
             return false;
         }
 
-        // Create and store the warming Promise
         const warmingPromise = this._performWarmUp(modelName);
         this.warmingModels.set(modelName, warmingPromise);
         this.lastWarmUpAttempt.set(modelName, now);
@@ -992,7 +939,6 @@ class OllamaService extends EventEmitter {
             
             return result;
         } finally {
-            // Always clean up the warming Promise
             this.warmingModels.delete(modelName);
         }
     }
@@ -1010,10 +956,11 @@ class OllamaService extends EventEmitter {
                     model: modelName,
                     messages: [{ role: 'user', content: 'Hi' }],
                     stream: false,
-                    options: { num_predict: 1, temperature: 0 },
+                    // Loads the model with the context length every later request uses.
+                    options: { num_predict: 1, temperature: 0, num_ctx: NUM_CTX },
                 }),
             });
-            // A 404/500 used to count as warmed.
+            // Without this a 404/500 would count as warmed.
             if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             return true;
         } catch (error) {
@@ -1025,7 +972,6 @@ class OllamaService extends EventEmitter {
 
     async autoWarmUpSelectedModel() {
         try {
-            // Get selected model from ModelStateService
             const modelStateService = global.modelStateService;
             if (!modelStateService) {
                 console.log('[OllamaService] ModelStateService not available for auto warm-up');
@@ -1034,15 +980,13 @@ class OllamaService extends EventEmitter {
 
             const selectedModels = await modelStateService.getSelectedModels();
             const llmModelId = selectedModels.llm;
-            
-            // Check if it's an Ollama model
+
             const provider = modelStateService.getProviderForModel('llm', llmModelId);
             if (provider !== 'ollama') {
                 console.log('[OllamaService] Selected LLM is not Ollama, skipping warm-up');
                 return false;
             }
 
-            // Check if Ollama service is running
             const isRunning = await this.isServiceRunning();
             if (!isRunning) {
                 console.log('[OllamaService] Ollama service not running, clearing warm-up cache');
@@ -1050,11 +994,9 @@ class OllamaService extends EventEmitter {
                 return false;
             }
 
-            // 설치 여부 체크 제거 - _performWarmUp에서 자동으로 설치 처리
             console.log(`[OllamaService] Auto-warming up selected model: ${llmModelId} (will auto-install if needed)`);
             const result = await this.warmUpModel(llmModelId);
-            
-            // 성공 시 LocalAIManager에 알림
+
             if (result) {
                 this.emit('model-warmed-up', { model: llmModelId });
             }
@@ -1080,15 +1022,14 @@ class OllamaService extends EventEmitter {
         return {
             warmedModels: Array.from(this.warmedModels),
             warmingModels: Array.from(this.warmingModels.keys()),
-            loadedModels: loadedModels,  // Models actually loaded in memory
+            loadedModels: loadedModels,
             lastAttempts: Object.fromEntries(this.lastWarmUpAttempt)
         };
     }
 
     async shutdown(force = false) {
         console.log(`[OllamaService] Shutdown initiated (force: ${force})`);
-        
-        // 종료 중 플래그 설정
+
         this.isShuttingDown = true;
         
         if (!force && this.warmingModels.size > 0) {
@@ -1097,7 +1038,6 @@ class OllamaService extends EventEmitter {
             
             const warmingPromises = Array.from(this.warmingModels.values());
             try {
-                // Use Promise.allSettled instead of race with setTimeout
                 const results = await Promise.allSettled(warmingPromises);
                 const completed = results.filter(r => r.status === 'fulfilled').length;
                 console.log(`[OllamaService] ${completed}/${results.length} warming operations completed`);
@@ -1106,11 +1046,9 @@ class OllamaService extends EventEmitter {
             }
         }
 
-        // Clean up all resources
         this._clearWarmUpCache();
         this.stopPeriodicSync();
-        
-        // 프로세스 종료
+
         const isRunning = await this.isServiceRunning();
         if (!isRunning) {
             console.log('[OllamaService] Service not running, nothing to shutdown');
@@ -1139,37 +1077,31 @@ class OllamaService extends EventEmitter {
 
     async shutdownMacOS(force) {
         try {
-            // 1. First, try to kill ollama server process
             console.log('[OllamaService] Killing ollama server process...');
             try {
                 await spawnAsync('pkill', ['-f', 'ollama serve']);
             } catch (e) {
                 // Process might not be running
             }
-            
-            // 2. Then quit the Ollama.app
+
             console.log('[OllamaService] Quitting Ollama.app...');
             try {
                 await spawnAsync('osascript', ['-e', 'tell application "Ollama" to quit']);
             } catch (e) {
                 console.log('[OllamaService] Ollama.app might not be running');
             }
-            
-            // 3. Wait a moment for shutdown
+
             await new Promise(resolve => setTimeout(resolve, 2000));
-            
-            // 4. Force kill any remaining ollama processes
+
             if (force || await this.isServiceRunning()) {
                 console.log('[OllamaService] Force killing any remaining ollama processes...');
                 try {
-                    // Kill all ollama processes
                     await spawnAsync('pkill', ['-9', '-f', 'ollama']);
                 } catch (e) {
-                    // Ignore errors - process might not exist
+                    // Process might not exist
                 }
             }
-            
-            // 5. Final check
+
             await new Promise(resolve => setTimeout(resolve, 1000));
             const stillRunning = await this.isServiceRunning();
             if (stillRunning) {
@@ -1187,7 +1119,6 @@ class OllamaService extends EventEmitter {
 
     async shutdownWindows(force) {
         try {
-            // Try to stop the service gracefully
             await spawnAsync('taskkill', ['/IM', 'ollama.exe', '/T']);
             console.log('[OllamaService] Ollama process terminated on Windows');
             return true;
@@ -1218,10 +1149,8 @@ class OllamaService extends EventEmitter {
     }
 
     async getAllModelsWithStatus() {
-        // Get all installed models directly from Ollama
         const installedModels = await this.getInstalledModels();
-        
-        // Get loaded models from memory
+
         const loadedModels = await this.getLoadedModels();
         
         const models = [];
@@ -1232,7 +1161,7 @@ class OllamaService extends EventEmitter {
             
             models.push({
                 name: model.name,
-                displayName: model.name, // Use model name as display name
+                displayName: model.name,
                 size: model.size || 'Unknown',
                 description: `Ollama model: ${model.name}`,
                 installed: true,
@@ -1240,12 +1169,12 @@ class OllamaService extends EventEmitter {
                 progress: this.getInstallProgress(model.name),
                 warmedUp: isWarmedUp,
                 isWarmingUp,
-                isLoaded,  // Actually loaded in memory
+                isLoaded,
                 status: isWarmingUp ? 'warming' : (isLoaded ? 'loaded' : (isWarmedUp ? 'ready' : 'cold'))
             });
         }
-        
-        // Also add any models currently being installed
+
+        // Models still being pulled aren't in /api/tags yet.
         for (const [modelName, progress] of this.installationProgress) {
             if (!models.find(m => m.name === modelName)) {
                 models.push({
@@ -1286,13 +1215,11 @@ class OllamaService extends EventEmitter {
     async handleInstall() {
         try {
             const onProgress = (data) => {
-                // Emit progress event - LocalAIManager가 처리
                 this.emit('install-progress', data);
             };
 
             await this.autoInstall(onProgress);
-            
-            // 설치 검증
+
             onProgress({ stage: 'verifying', message: 'Verifying installation...', progress: 0 });
             const verifyResult = await this.verifyInstallation();
             if (!verifyResult.success) {
@@ -1307,13 +1234,11 @@ class OllamaService extends EventEmitter {
             }
             
             this.installState.isInstalled = true;
-            // Emit completion event - LocalAIManager가 처리
             this.emit('installation-complete');
             return { success: true };
         } catch (error) {
             console.error('[OllamaService] Failed to install:', error);
             await this.rollbackToLastCheckpoint();
-            // Emit error event - LocalAIManager가 처리
             this.emit('error', {
                 errorType: 'installation-failed',
                 error: error.message
@@ -1385,8 +1310,7 @@ class OllamaService extends EventEmitter {
         } catch (error) {
             console.error('[OllamaService] Failed to pull model:', error);
             await ollamaModelRepository.updateInstallStatus(modelName, false, false);
-            // Emit error event - LocalAIManager가 처리
-            this.emit('error', { 
+            this.emit('error', {
                 errorType: 'model-pull-failed',
                 model: modelName, 
                 error: error.message 
@@ -1439,10 +1363,9 @@ class OllamaService extends EventEmitter {
         try {
             console.log(`[OllamaService] Manual shutdown requested (force: ${force})`);
             const success = await this.shutdown(force);
-            
-            // 종료 후 상태 업데이트 및 플래그 리셋
+
             if (success) {
-                // 종료 완료 후 플래그 리셋
+                // Reset before syncState(), which is a no-op while shutting down.
                 this.isShuttingDown = false;
                 await this.syncState();
             }
@@ -1453,30 +1376,25 @@ class OllamaService extends EventEmitter {
             return { success: false, error: error.message };
         }
     }
-    
-    // 설치 검증
+
     async verifyInstallation() {
         try {
             console.log('[OllamaService] Verifying installation...');
-            
-            // 1. 바이너리 확인
+
             const isInstalled = await this.isInstalled();
             if (!isInstalled) {
                 return { success: false, error: 'Ollama binary not found' };
             }
-            
-            // 2. CLI 명령 테스트
+
             try {
                 const { stdout } = await spawnAsync(this.getOllamaCliPath(), ['--version']);
                 console.log('[OllamaService] Ollama version:', stdout.trim());
             } catch (error) {
                 return { success: false, error: 'Ollama CLI not responding' };
             }
-            
-            // 3. 서비스 시작 가능 여부 확인
+
             const platform = this.getPlatform();
             if (platform === 'darwin') {
-                // macOS: 앱 번들 확인
                 try {
                     await fs.access('/Applications/Ollama.app/Contents/MacOS/Ollama');
                 } catch (error) {
@@ -1494,6 +1412,5 @@ class OllamaService extends EventEmitter {
     }
 }
 
-// Export singleton instance
 const ollamaService = new OllamaService();
 module.exports = ollamaService;

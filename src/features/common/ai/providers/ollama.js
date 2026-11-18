@@ -1,82 +1,86 @@
 const { StringDecoder } = require('string_decoder');
 const fetch = require('node-fetch');
 
-// Request Queue System for Ollama API (only for non-streaming requests)
+/**
+ * Sends requests to Ollama one at a time (it runs one generation per model
+ * anyway) and lets the live summary yield to everything else.
+ *
+ * A background request (the summary: ~20 s with a screenshot on gemma4:e4b)
+ * would otherwise hold up the question detector and Ask. A new foreground
+ * request jumps ahead of queued background ones and aborts a running one;
+ * the aborted request goes back to the queue and runs again from scratch.
+ * Aborting closes the HTTP connection, so Ollama stops generating it.
+ *
+ * A streaming request counts as done once the response headers arrive: the
+ * stream itself goes on, and Ollama queues later requests behind it.
+ */
 class RequestQueue {
     constructor() {
         this.queue = [];
-        this.processing = false;
-        this.streamingActive = false;
+        this.running = null;
     }
 
-    async addStreamingRequest(requestFn) {
-        // Streaming requests have priority - wait for current processing to finish
-        while (this.processing) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-        }
-        
-        this.streamingActive = true;
-        console.log('[Ollama Queue] Starting streaming request (priority)');
-        
-        try {
-            const result = await requestFn();
-            return result;
-        } finally {
-            this.streamingActive = false;
-            console.log('[Ollama Queue] Streaming request completed');
-        }
-    }
-
-    async add(requestFn) {
+    /**
+     * @param {(signal: AbortSignal) => Promise<any>} requestFn may be called
+     *   again after a preemption, so it must not consume one-off state.
+     * @param {{background?: boolean}} [options]
+     */
+    add(requestFn, { background = false } = {}) {
         return new Promise((resolve, reject) => {
-            this.queue.push({ requestFn, resolve, reject });
-            this.process();
+            const job = { requestFn, background, resolve, reject, controller: null };
+            if (background) {
+                this.queue.push(job);
+            } else {
+                this.queue.splice(this._firstBackgroundIndex(), 0, job);
+                if (this.running?.background) {
+                    console.log('[Ollama Queue] Preempting a background request');
+                    this.running.controller.abort();
+                }
+            }
+            this._next();
         });
     }
 
-    async process() {
-        if (this.processing || this.queue.length === 0) {
-            return;
-        }
+    _firstBackgroundIndex() {
+        const index = this.queue.findIndex(job => job.background);
+        return index === -1 ? this.queue.length : index;
+    }
 
-        // Wait if streaming is active
-        if (this.streamingActive) {
-            setTimeout(() => this.process(), 100);
-            return;
-        }
+    _next() {
+        if (this.running || this.queue.length === 0) return;
+        const job = this.queue.shift();
+        job.controller = new AbortController();
+        this.running = job;
 
-        this.processing = true;
-
-        while (this.queue.length > 0) {
-            // Check if streaming started while processing queue
-            if (this.streamingActive) {
-                this.processing = false;
-                setTimeout(() => this.process(), 100);
-                return;
-            }
-
-            const { requestFn, resolve, reject } = this.queue.shift();
-            
-            try {
-                console.log(`[Ollama Queue] Processing queued request (${this.queue.length} remaining)`);
-                const result = await requestFn();
-                resolve(result);
-            } catch (error) {
-                console.error('[Ollama Queue] Request failed:', error);
-                reject(error);
-            }
-        }
-
-        this.processing = false;
+        Promise.resolve()
+            .then(() => job.requestFn(job.controller.signal))
+            .then(job.resolve, error => {
+                if (job.background && job.controller.signal.aborted) {
+                    // Ahead of newer background requests, behind the foreground ones.
+                    this.queue.splice(this._firstBackgroundIndex(), 0, job);
+                } else {
+                    job.reject(error);
+                }
+            })
+            .finally(() => {
+                this.running = null;
+                this._next();
+            });
     }
 }
 
-// Global request queue instance
 const requestQueue = new RequestQueue();
 
 const DEFAULT_BASE_URL = 'http://localhost:11434';
 
-// --- Thinking ---------------------------------------------------------------
+// Without num_ctx Ollama loads gemma4 with its full 131072-token context:
+// 2.1 GB of KV cache and 0.9 GB of compute buffers, ~2.3 GB more than at 8192
+// on a 16 GB Mac that also runs whisper and a video call. The largest request
+// (Ask: ~3000 prompt tokens with 30 transcript turns and a screenshot, plus up
+// to 4096 tokens with reasoning) fits in 8192. Every request must send the
+// same value: a different num_ctx makes Ollama reload the model.
+const NUM_CTX = 8192;
+
 // Reasoning models (gemma4, qwen3, ...) think by default. On gemma4:e4b that is
 // ~1000 hidden tokens, ~30 s before the first visible word. The 'think' flag is
 // sent only to models that report the capability: other models reject it.
@@ -107,7 +111,6 @@ async function thinkFields(baseUrl, model, think) {
     return (await supportsThinking(baseUrl, model)) ? { think } : {};
 }
 
-// --- Keep-alive -------------------------------------------------------------
 // Ollama unloads a model 5 min after its last request, and reloading
 // gemma4:e4b costs ~7 s on the next Ask. While a listen session runs the model
 // is held in memory; the hold is renewed periodically instead of using
@@ -130,7 +133,7 @@ async function sendLoadRequest(model, extra = {}) {
         const res = await fetch(`${DEFAULT_BASE_URL}/api/chat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model, messages: [], ...extra }),
+            body: JSON.stringify({ model, messages: [], ...extra, options: { num_ctx: NUM_CTX } }),
         });
         if (!res.ok) console.warn(`[Ollama Provider] Load request for ${model} failed: ${res.status}`);
     } catch (error) {
@@ -200,12 +203,19 @@ function convertMessagesToOllamaFormat(messages) {
     });
 }
 
+/**
+ * @param {object} opts
+ * @param {boolean} [opts.background] yields to other requests (see RequestQueue)
+ * @param {'json'|object} [opts.format] Ollama structured output: 'json' or a JSON schema
+ */
 function createLLM({ 
     model, 
     temperature = 0.7, 
     maxTokens = 2048, 
     baseUrl = DEFAULT_BASE_URL,
     think,
+    background = false,
+    format,
     ...config 
 }) {
     if (!model) {
@@ -237,12 +247,12 @@ function createLLM({
             }
             messages.push({ role: 'user', content: userContent.join('\n') });
 
-            // Use request queue to prevent concurrent API calls
-            return await requestQueue.add(async () => {
+            return await requestQueue.add(async signal => {
                 try {
                     const response = await fetch(`${baseUrl}/api/chat`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
+                        signal,
                         body: JSON.stringify({
                             model,
                             messages,
@@ -252,6 +262,7 @@ function createLLM({
                             options: {
                                 temperature,
                                 num_predict: maxTokens,
+                                num_ctx: NUM_CTX,
                             }
                         })
                     });
@@ -278,23 +289,25 @@ function createLLM({
         chat: async (messages) => {
             const ollamaMessages = convertMessagesToOllamaFormat(messages);
 
-            // Use request queue to prevent concurrent API calls
-            return await requestQueue.add(async () => {
+            const request = async signal => {
                 try {
                     const response = await fetch(`${baseUrl}/api/chat`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
+                        signal,
                         body: JSON.stringify({
                             model,
                             messages: ollamaMessages,
                             stream: false,
+                            ...(format && { format }),
                             ...(await thinkFields(baseUrl, model, think)),
                             ...keepAliveFields(model),
                             options: {
                                 temperature,
                                 num_predict: maxTokens,
-                            }
-                        })
+                                num_ctx: NUM_CTX,
+                            },
+                        }),
                     });
 
                     if (!response.ok) {
@@ -302,16 +315,14 @@ function createLLM({
                     }
 
                     const result = await response.json();
-                    
-                    return {
-                        content: result.message.content,
-                        raw: result
-                    };
+                    return { content: result.message.content, raw: result };
                 } catch (error) {
-                    console.error('Ollama chat error:', error);
+                    // A preempted background request is re-run by the queue.
+                    if (!signal.aborted) console.error('Ollama chat error:', error);
                     throw error;
                 }
-            });
+            };
+            return await requestQueue.add(request, { background });
         }
     };
 }
@@ -319,11 +330,10 @@ function createLLM({
 /**
  * Turns Ollama's NDJSON chat stream into OpenAI-style SSE chunks.
  *
- * The consumer may cancel at any time (Ask cancels its reader on a new
- * question or when the window closes). After that the controller is closed,
- * so later 'data'/'end' events must not touch it - controller.close() on a
- * closed stream throws and crashed the app. Cancelling also destroys the HTTP
- * body, so Ollama stops generating an answer nobody reads.
+ * The consumer may cancel at any time (Ask does on a new question or when the
+ * window closes). The controller is then closed, so later 'data'/'end' events
+ * must not touch it: close() on a closed stream throws and crashes the app.
+ * Cancelling also destroys the HTTP body, so Ollama stops generating.
  */
 function ollamaStreamSource(body) {
     let finished = false;
@@ -414,8 +424,8 @@ function createStreamingLLM({
             const textChars = ollamaMessages.reduce((n, m) => n + (typeof m.content === 'string' ? m.content.length : 0), 0);
             console.log(`[Ollama Provider] ${ollamaMessages.length} messages, ${textChars} text chars, ${imageCount} image(s), model ${model}`);
 
-            // Streaming requests have priority over queued requests
-            return await requestQueue.addStreamingRequest(async () => {
+            // Foreground: preempts a queued or running background summary.
+            return await requestQueue.add(async () => {
                 try {
                     const response = await fetch(`${baseUrl}/api/chat`, {
                         method: 'POST',
@@ -429,6 +439,7 @@ function createStreamingLLM({
                             options: {
                                 temperature,
                                 num_predict: maxTokens,
+                                num_ctx: NUM_CTX,
                             }
                         })
                     });
@@ -461,7 +472,9 @@ module.exports = {
     createStreamingLLM,
     convertMessagesToOllamaFormat,
     holdModelLoaded,
+    NUM_CTX,
     // Exported for tests.
     ollamaStreamSource,
+    RequestQueue,
     releaseModel,
 }; 

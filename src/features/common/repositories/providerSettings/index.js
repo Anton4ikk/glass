@@ -1,12 +1,10 @@
 const sqliteRepository = require('./sqlite.repository');
 
 function getBaseRepository() {
-    // For now, we only have sqlite. This could be expanded later.
     return sqliteRepository;
 }
 
 const providerSettingsRepositoryAdapter = {
-    // Core CRUD operations
     async getByProvider(provider) {
         const repo = getBaseRepository();
         return await repo.getByProvider(provider);

@@ -37,7 +37,7 @@ class GeminiProvider {
 async function createSTT({ apiKey, language = "en-US", callbacks = {}, ...config }) {
   const liveClient = new GoogleGenAI({ vertexai: false, apiKey })
 
-  // Language code BCP-47 conversion
+  // Gemini expects a BCP-47 tag (en-US), not a bare language code.
   const lang = language.includes("-") ? language : `${language}-US`
 
   const session = await liveClient.live.connect({
@@ -64,9 +64,6 @@ async function createSTT({ apiKey, language = "en-US", callbacks = {}, ...config
   }
 }
 
-/**
- * Creates a Gemini LLM instance with proper text response handling
- */
 function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxTokens = 8192, ...config }) {
   const client = new GoogleGenerativeAI(apiKey)
 
@@ -77,7 +74,6 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
         generationConfig: {
           temperature,
           maxOutputTokens: maxTokens,
-          // Ensure we get text responses, not JSON
           responseMimeType: "text/plain",
         },
       })
@@ -87,8 +83,7 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
 
       for (const part of parts) {
         if (typeof part === "string") {
-          // Don't automatically assume strings starting with "You are" are system prompts
-          // Check if it's explicitly marked as a system instruction
+          // Unlike the OpenAI/Anthropic providers, "You are..." strings are not split out as a system prompt.
           userContent.push(part)
         } else if (part.inlineData) {
           userContent.push({
@@ -104,7 +99,6 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
         const result = await geminiModel.generateContent(userContent)
         const response = await result.response
 
-        // Return plain text, not wrapped in JSON structure
         return {
           response: {
             text: () => response.text(),
@@ -117,20 +111,18 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
     },
 
     chat: async (messages) => {
-      // Filter out any system prompts that might be causing JSON responses
       let systemInstruction = ""
       const history = []
       let lastMessage
 
       messages.forEach((msg, index) => {
         if (msg.role === "system") {
-          // Clean system instruction - avoid JSON formatting requests
+          // Gemini readily answers in JSON: strip JSON requests and ask for plain text.
           systemInstruction = msg.content
             .replace(/respond in json/gi, "")
             .replace(/format.*json/gi, "")
             .replace(/return.*json/gi, "")
 
-          // Add explicit instruction for natural text
           if (!systemInstruction.includes("respond naturally")) {
             systemInstruction += "\n\nRespond naturally in plain text, not in JSON or structured format."
           }
@@ -154,7 +146,6 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
         generationConfig: {
           temperature: temperature,
           maxOutputTokens: maxTokens,
-          // Force plain text responses
           responseMimeType: "text/plain",
         },
       })
@@ -165,7 +156,6 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
 
       let content = lastMessage.content
 
-      // Handle multimodal content
       if (Array.isArray(content)) {
         const geminiContent = []
         for (const part of content) {
@@ -189,7 +179,6 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
       const result = await chat.sendMessage(content)
       const response = await result.response
 
-      // Return plain text content
       return {
         content: response.text(),
         raw: result,
@@ -198,9 +187,6 @@ function createLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxT
   }
 }
 
-/**
- * Creates a Gemini streaming LLM instance with text response fix
- */
 function createStreamingLLM({ apiKey, model = "gemini-2.5-flash", temperature = 0.7, maxTokens = 8192, ...config }) {
   const client = new GoogleGenerativeAI(apiKey)
 
@@ -213,7 +199,7 @@ function createStreamingLLM({ apiKey, model = "gemini-2.5-flash", temperature = 
 
       for (const msg of messages) {
         if (msg.role === "system") {
-          // Clean and modify system instruction
+          // Same JSON stripping as chat().
           systemInstruction = msg.content
             .replace(/respond in json/gi, "")
             .replace(/format.*json/gi, "")
@@ -235,7 +221,6 @@ function createStreamingLLM({ apiKey, model = "gemini-2.5-flash", temperature = 
         generationConfig: {
           temperature,
           maxOutputTokens: maxTokens || 8192,
-          // Force plain text responses
           responseMimeType: "text/plain",
         },
       })
@@ -287,7 +272,7 @@ function createStreamingLLM({ apiKey, model = "gemini-2.5-flash", temperature = 
             for await (const chunk of result.stream) {
               const chunkText = chunk.text() || ""
 
-              // Format as SSE data - this should now be plain text
+              // OpenAI-style SSE, which the callers parse.
               const data = JSON.stringify({
                 choices: [
                   {

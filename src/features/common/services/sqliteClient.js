@@ -44,7 +44,7 @@ class SQLiteClient {
     _migrateProviderSettings() {
         const tablesInDb = this.getTablesFromDb();
         if (!tablesInDb.includes('provider_settings')) {
-            return; // Table doesn't exist, no migration needed.
+            return;
         }
     
         const providerSettingsInfo = this.db.prepare(`PRAGMA table_info(provider_settings)`).all();
@@ -60,8 +60,7 @@ class SQLiteClient {
     
                     this.createTable('provider_settings', LATEST_SCHEMA.provider_settings);
                     console.log('[DB Migration] Created new provider_settings table');
-    
-                    // Dynamically build the migration query for robustness
+
                     const oldColumnNames = this.db.prepare(`PRAGMA table_info(provider_settings_old)`).all().map(c => c.name);
                     const newColumnNames = LATEST_SCHEMA.provider_settings.columns.map(c => c.name);
                     const commonColumns = newColumnNames.filter(name => oldColumnNames.includes(name));
@@ -99,8 +98,7 @@ class SQLiteClient {
                 console.log('[DB Migration] provider_settings migration completed successfully.');
             } catch (error) {
                 console.error('[DB Migration] Failed to migrate provider_settings table.', error);
-                
-                // Try to recover by dropping the temp table if it exists
+
                 const oldTableExists = this.getTablesFromDb().includes('provider_settings_old');
                 if (oldTableExists) {
                     this.db.exec('DROP TABLE provider_settings_old');
@@ -114,7 +112,7 @@ class SQLiteClient {
     async synchronizeSchema() {
         console.log('[DB Sync] Starting schema synchronization...');
 
-        // Run special migration for provider_settings before the generic sync logic
+        // Must run before the generic sync, which only adds missing columns.
         this._migrateProviderSettings();
 
         const tablesInDb = this.getTablesFromDb();
@@ -123,10 +121,8 @@ class SQLiteClient {
             const tableSchema = LATEST_SCHEMA[tableName];
 
             if (!tablesInDb.includes(tableName)) {
-                // Table doesn't exist, create it
                 this.createTable(tableName, tableSchema);
             } else {
-                // Table exists, check for missing columns
                 this.updateTable(tableName, tableSchema);
             }
         }
@@ -154,12 +150,10 @@ class SQLiteClient {
 
     updateTable(tableName, tableSchema) {
         const safeTableName = this._validateAndQuoteIdentifier(tableName);
-        
-        // Get current columns
+
         const currentColumns = this.db.prepare(`PRAGMA table_info(${safeTableName})`).all();
         const currentColumnNames = currentColumns.map(col => col.name);
 
-        // Check for new columns to add
         const newColumns = tableSchema.columns.filter(col => !currentColumnNames.includes(col.name));
 
         if (newColumns.length > 0) {

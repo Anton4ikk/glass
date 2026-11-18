@@ -13,8 +13,8 @@ npm run setup            # first time: install root + pickleglass_web, build web
 npm start                # build renderer bundles (esbuild) then launch Electron
 npm run watch:renderer   # rebuild renderer bundles on change (re-run electron to pick them up)
 npm run build:web        # Next.js static export -> pickleglass_web/out (required before start)
-npm run build            # full production build via electron-builder (macOS dmg/zip)
-npm run package          # unpacked build (--dir), quicker for local testing
+npm run build            # production build (universal .app) -> ~/Desktop/Glass.app
+npm run package          # unpacked native-arch build (--dir), quicker -> ~/Desktop/Glass.app
 ```
 
 ### Checks: run after every change
@@ -35,7 +35,9 @@ DEBUG_TESTS=1 npm test                      # show app console.log output (silen
 - CI (`.github/workflows/build.yml`) runs lint → test → macOS production build on push to `main`.
 - A Claude Code Stop + SubagentStop hook (`.claude/settings.json` → `.claude/hooks/check-on-stop.js`) runs `npm run check` at the end of a turn (main agent or subagent) whenever watched JS/JSON files differ from HEAD, and blocks the stop with the failures (max 3 times in a row, counted per agent). Worktree-isolated subagents aren't covered: the hook checks the main checkout. It skips changes that already passed; that state lives in `.git/claude-check-ok`.
 - When launching Electron from a VSCode terminal or tool call, unset `ELECTRON_RUN_AS_NODE` (`env -u ELECTRON_RUN_AS_NODE npm start`). Otherwise Electron silently runs as plain Node.
-- `postbuild`/`postpackage` run `scripts/reset-tcc.js`, which resets the macOS Screen Recording grant for `com.pickle.glass`. A rebuild changes the code signature and invalidates the old grant, so permission has to be granted again after each build.
+- `prebuild`/`prepackage` run `npm run check`, so a red check stops the build.
+- The only build lives at `~/Desktop/Glass.app`: `postbuild`/`postpackage` run `scripts/install-to-desktop.js`, which quits a running Glass, moves the fresh `.app` there and deletes `dist/` (skipped on CI). The macOS target is `dir` only, with no dmg/zip.
+- `postbuild`/`postpackage` then run `scripts/reset-tcc.js`, which resets the macOS Screen Recording grant for `com.pickle.glass`. A rebuild changes the code signature and invalidates the old grant, so permission has to be granted again after each build.
 
 ### Environment variables
 - `GLASS_DEVTOOLS=1` opens DevTools for all windows; `GLASS_DEVTOOLS=listen` opens them only for the listen window. This only works when the app is not packaged.
@@ -77,4 +79,4 @@ SQLite schema lives only in `src/features/common/config/schema.js`. `sqliteClien
 
 ### Other
 - Many code comments are in Korean (from the upstream project).
-- The fork-specific changes (OpenAI STT reconnect, gain boost, multilingual summaries, etc.) are documented at the bottom of `README.md`.
+- There is no README: the project is a personal tool. Don't add README files, changelogs or other docs; explain decisions in code comments.

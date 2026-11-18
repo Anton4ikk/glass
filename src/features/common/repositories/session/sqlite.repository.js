@@ -77,8 +77,7 @@ function touch(id) {
 function getOrCreateActive(uid, requestedType = 'ask') {
     const db = sqliteClient.getDb();
     
-    // 1. Look for ANY active session for the user (ended_at IS NULL).
-    //    Prefer 'listen' sessions over 'ask' sessions to ensure continuity.
+    // Reuse any open session, preferring 'listen' so an Ask during a meeting joins it.
     const findQuery = `
         SELECT id, session_type FROM sessions 
         WHERE uid = ? AND ended_at IS NULL
@@ -89,20 +88,16 @@ function getOrCreateActive(uid, requestedType = 'ask') {
     const activeSession = db.prepare(findQuery).get(uid);
 
     if (activeSession) {
-        // An active session exists.
         console.log(`[Repo] Found active session ${activeSession.id} of type ${activeSession.session_type}`);
-        
-        // 2. Promotion Logic: If it's an 'ask' session and we need 'listen', promote it.
+
         if (activeSession.session_type === 'ask' && requestedType === 'listen') {
             updateType(activeSession.id, 'listen');
             console.log(`[Repo] Promoted session ${activeSession.id} to 'listen' type.`);
         }
 
-        // 3. Touch the session and return its ID.
         touch(activeSession.id);
         return activeSession.id;
     } else {
-        // 4. No active session found, create a new one.
         console.log(`[Repo] No active session for user ${uid}. Creating new '${requestedType}' session.`);
         return create(uid, requestedType);
     }
@@ -111,7 +106,6 @@ function getOrCreateActive(uid, requestedType = 'ask') {
 function endAllActiveSessions(uid) {
     const db = sqliteClient.getDb();
     const now = Math.floor(Date.now() / 1000);
-    // Filter by uid to match the Firebase repository's behavior.
     const query = `UPDATE sessions SET ended_at = ?, updated_at = ? WHERE ended_at IS NULL AND uid = ?`;
     
     try {

@@ -1,8 +1,5 @@
 const sqliteClient = require('../../services/sqliteClient');
 
-/**
- * Get all Ollama models
- */
 function getAllModels() {
     const db = sqliteClient.getDb();
     const query = 'SELECT * FROM ollama_models ORDER BY name';
@@ -15,9 +12,6 @@ function getAllModels() {
     }
 }
 
-/**
- * Get a specific model by name
- */
 function getModel(name) {
     const db = sqliteClient.getDb();
     const query = 'SELECT * FROM ollama_models WHERE name = ?';
@@ -30,9 +24,6 @@ function getModel(name) {
     }
 }
 
-/**
- * Create or update a model entry
- */
 function upsertModel({ name, size, installed = false, installing = false }) {
     const db = sqliteClient.getDb();
     const query = `
@@ -53,10 +44,7 @@ function upsertModel({ name, size, installed = false, installing = false }) {
     }
 }
 
-/**
- * Update installation status for a model
- * Upserts, since models are discovered dynamically from Ollama and may not have a row yet
- */
+// Upserts, since models are discovered dynamically from Ollama and may not have a row yet.
 function updateInstallStatus(name, installed, installing = false) {
     const db = sqliteClient.getDb();
     const query = `
@@ -76,19 +64,12 @@ function updateInstallStatus(name, installed, installing = false) {
     }
 }
 
-/**
- * Initialize default models - now done dynamically based on installed models
- */
+// No-op kept for callers: models are detected dynamically from the Ollama installation.
 function initializeDefaultModels() {
-    // Default models are now detected dynamically from Ollama installation
-    // This function maintains compatibility but doesn't hardcode any models
     console.log('[OllamaModel Repository] Default models initialization skipped - using dynamic detection');
     return { success: true };
 }
 
-/**
- * Delete a model entry
- */
 function deleteModel(name) {
     const db = sqliteClient.getDb();
     const query = 'DELETE FROM ollama_models WHERE name = ?';
@@ -102,9 +83,6 @@ function deleteModel(name) {
     }
 }
 
-/**
- * Get installed models
- */
 function getInstalledModels() {
     const db = sqliteClient.getDb();
     const query = 'SELECT * FROM ollama_models WHERE installed = 1 ORDER BY name';
@@ -118,18 +96,15 @@ function getInstalledModels() {
 }
 
 /**
- * Drop rows for models Ollama no longer reports.
+ * Drop rows for models Ollama no longer reports. The sync loop only upserts
+ * present models, so one removed with `ollama rm` would otherwise keep counting
+ * towards "is this provider configured?".
  *
- * The sync loop only ever upserts models that are present, so a model removed
- * with `ollama rm` would otherwise stay here forever and keep counting towards
- * "is this provider configured?".
+ * Rows with installing = 1 are kept: a model being pulled is absent from
+ * Ollama's list until the download finishes.
  *
- * Rows with installing = 1 are kept: a model still being pulled is legitimately
- * absent from Ollama's list and must not be dropped mid-download.
- *
- * Callers must not pass an empty list to mean "nothing installed" - see the
- * guard in ollamaService, where an empty list is indistinguishable from a
- * failed request.
+ * An empty list is ignored: it is indistinguishable from a failed request
+ * (see the guard in ollamaService).
  */
 function pruneMissingModels(liveModelNames) {
     const db = sqliteClient.getDb();
@@ -150,9 +125,6 @@ function pruneMissingModels(liveModelNames) {
     }
 }
 
-/**
- * Get models currently being installed
- */
 function getInstallingModels() {
     const db = sqliteClient.getDb();
     const query = 'SELECT * FROM ollama_models WHERE installing = 1 ORDER BY name';

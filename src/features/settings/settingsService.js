@@ -4,7 +4,6 @@ const settingsRepository = require('./repositories');
 const { LOCAL_UID } = require('../common/config/localUser');
 const { getStoredApiKey, getStoredProvider, windowPool } = require('../../window/windowManager');
 
-// New imports for common services
 const modelStateService = require('../common/services/modelStateService');
 const localAIManager = require('../common/services/localAIManager');
 
@@ -15,7 +14,6 @@ const store = new Store({
     }
 });
 
-// Configuration constants
 const NOTIFICATION_CONFIG = {
     RELEVANT_WINDOW_TYPES: ['settings', 'main'],
     DEBOUNCE_DELAY: 300, // prevent spam during bulk operations (ms)
@@ -23,7 +21,6 @@ const NOTIFICATION_CONFIG = {
     RETRY_BASE_DELAY: 1000, // exponential backoff base (ms)
 };
 
-// New facade functions for model state management
 async function getModelSettings() {
     try {
         const [config, storedKeys, selectedModels, availableLlm, availableStt] = await Promise.all([
@@ -51,7 +48,6 @@ async function setSelectedModel(type, modelId) {
     return { success };
 }
 
-// LocalAI facade functions
 async function getOllamaStatus() {
     return localAIManager.getServiceStatus('ollama');
 }
@@ -68,19 +64,11 @@ async function shutdownOllama() {
     return localAIManager.stopService('ollama');
 }
 
-
-// window targeting system
 class WindowNotificationManager {
     constructor() {
         this.pendingNotifications = new Map();
     }
 
-    /**
-     * Send notifications only to relevant windows
-     * @param {string} event - Event name
-     * @param {*} data - Event data
-     * @param {object} options - Notification options
-     */
     notifyRelevantWindows(event, data = null, options = {}) {
         const { 
             windowTypes = NOTIFICATION_CONFIG.RELEVANT_WINDOW_TYPES,
@@ -140,12 +128,10 @@ class WindowNotificationManager {
     }
 
     debounceNotification(key, fn, delay) {
-        // Clear existing timeout
         if (this.pendingNotifications.has(key)) {
             clearTimeout(this.pendingNotifications.get(key));
         }
 
-        // Set new timeout
         const timeoutId = setTimeout(() => {
             fn();
             this.pendingNotifications.delete(key);
@@ -155,16 +141,13 @@ class WindowNotificationManager {
     }
 
     cleanup() {
-        // Clear all pending notifications
         this.pendingNotifications.forEach(timeoutId => clearTimeout(timeoutId));
         this.pendingNotifications.clear();
     }
 }
 
-// Global instance
 const windowNotificationManager = new WindowNotificationManager();
 
-// Default keybinds configuration
 const DEFAULT_KEYBINDS = {
     mac: {
         moveUp: 'Cmd+Up',
@@ -196,7 +179,6 @@ const DEFAULT_KEYBINDS = {
     }
 };
 
-// Service state
 let currentSettings = null;
 
 function getDefaultSettings() {
@@ -242,8 +224,7 @@ async function saveSettings(settings) {
         
         store.set(userSettingsKey, newSettings);
         currentSettings = newSettings;
-        
-        // Use smart notification system
+
         windowNotificationManager.notifyRelevantWindows('settings-updated', currentSettings);
 
         return { success: true };
@@ -275,7 +256,6 @@ async function getPresetTemplates() {
 
 async function createPreset(title, prompt) {
     try {
-        // The adapter injects the UID.
         const result = await settingsRepository.createPreset({ title, prompt });
         
         windowNotificationManager.notifyRelevantWindows('presets-updated', {
@@ -293,7 +273,6 @@ async function createPreset(title, prompt) {
 
 async function updatePreset(id, title, prompt) {
     try {
-        // The adapter injects the UID.
         await settingsRepository.updatePreset(id, { title, prompt });
         
         windowNotificationManager.notifyRelevantWindows('presets-updated', {
@@ -311,7 +290,6 @@ async function updatePreset(id, title, prompt) {
 
 async function deletePreset(id) {
     try {
-        // The adapter injects the UID.
         await settingsRepository.deletePreset(id);
         
         windowNotificationManager.notifyRelevantWindows('presets-updated', {
@@ -328,15 +306,13 @@ async function deletePreset(id) {
 
 async function saveApiKey(apiKey, provider = 'openai') {
     try {
-        // Use ModelStateService as the single source of truth for API key management
         const modelStateService = global.modelStateService;
         if (!modelStateService) {
             throw new Error('ModelStateService not initialized');
         }
-        
+
         await modelStateService.setApiKey(provider, apiKey);
-        
-        // Notify windows
+
         BrowserWindow.getAllWindows().forEach(win => {
             if (!win.isDestroyed()) {
                 win.webContents.send('api-key-validated', apiKey);
@@ -352,19 +328,16 @@ async function saveApiKey(apiKey, provider = 'openai') {
 
 async function removeApiKey() {
     try {
-        // Use ModelStateService as the single source of truth for API key management
         const modelStateService = global.modelStateService;
         if (!modelStateService) {
             throw new Error('ModelStateService not initialized');
         }
-        
-        // Remove all API keys for all providers
+
         const providers = ['openai', 'anthropic', 'gemini', 'ollama', 'whisper'];
         for (const provider of providers) {
             await modelStateService.removeApiKey(provider);
         }
-        
-        // Notify windows
+
         BrowserWindow.getAllWindows().forEach(win => {
             if (!win.isDestroyed()) {
                 win.webContents.send('api-key-removed');
@@ -383,8 +356,7 @@ async function updateContentProtection(enabled) {
     try {
         const settings = await getSettings();
         settings.contentProtection = enabled;
-        
-        // Update content protection in main window
+
         const { app } = require('electron');
         const mainWindow = windowPool.get('main');
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -458,13 +430,11 @@ async function setAboutMeSetting(text) {
 }
 
 function initialize() {
-    // cleanup
     windowNotificationManager.cleanup();
-    
+
     console.log('[SettingsService] Initialized and ready.');
 }
 
-// Cleanup function
 function cleanup() {
     windowNotificationManager.cleanup();
     console.log('[SettingsService] Cleaned up resources.');
@@ -497,11 +467,9 @@ module.exports = {
     setAskThinkingSetting,
     getAboutMeSetting,
     setAboutMeSetting,
-    // Model settings facade
     getModelSettings,
     clearApiKey,
     setSelectedModel,
-    // Ollama facade
     getOllamaStatus,
     ensureOllamaReady,
     shutdownOllama

@@ -8,7 +8,7 @@ const ollamaModelRepository = require('../repositories/ollamaModel');
 class ModelStateService extends EventEmitter {
     constructor() {
         super();
-        // electron-store는 오직 레거시 데이터 마이그레이션 용도로만 사용됩니다.
+        // electron-store is only read to migrate legacy data.
         this.store = new Store({ name: 'pickle-glass-model-state' });
     }
 
@@ -86,11 +86,10 @@ class ModelStateService extends EventEmitter {
     async handleLocalAIStateChange(service, state) {
         console.log(`[ModelStateService] LocalAI state changed: ${service}`, state);
         if (service === 'whisper') {
-            // Whisper's `running` is only a lazy-init flag and `installed` is a
-            // PATH lookup that fails when the app is launched from Finder, so
-            // neither means the selection is unusable. Forcing a re-pick here
-            // replaced the user's model with the first installed one (tiny)
-            // on every 30 s sync. Only re-pick when the selected weights are gone.
+            // Whisper's `running` is a lazy-init flag and `installed` a PATH lookup
+            // that fails when launched from Finder, so neither makes the selection
+            // unusable. Forcing a re-pick swapped the user's model for tiny on every
+            // 30 s sync; re-pick only when the selected weights are gone.
             await this._autoSelectAvailableModels([]);
         } else if (!state.installed || !state.running) {
             // Re-pick only when the selection actually depends on Ollama; a
@@ -176,8 +175,7 @@ class ModelStateService extends EventEmitter {
         const finalKey = (provider === 'ollama' || provider === 'whisper') ? 'local' : key;
         const existingSettings = await providerSettingsRepository.getByProvider(provider) || {};
         await providerSettingsRepository.upsert(provider, { ...existingSettings, api_key: finalKey });
-        
-        // 키가 추가/변경되었으므로, 해당 provider의 모델을 자동 선택할 수 있는지 확인
+
         await this._autoSelectAvailableModels([]);
         
         this.emit('state-updated', await this.getLiveState());
@@ -207,9 +205,6 @@ class ModelStateService extends EventEmitter {
         return false;
     }
 
-    /**
-     * 유효한 API 키가 하나라도 설정되어 있는지 확인합니다.
-     */
     async hasValidApiKey() {
         const allSettings = await providerSettingsRepository.getAll();
         return allSettings.some(s => s.api_key && s.api_key.trim().length > 0);
@@ -327,8 +322,6 @@ class ModelStateService extends EventEmitter {
         };
     }
 
-    // --- 핸들러 및 유틸리티 메서드 ---
-
     async validateApiKey(provider, key) {
         if (!key || (key.trim() === '' && provider !== 'ollama' && provider !== 'whisper')) {
             return { success: false, error: 'API key cannot be empty.' };
@@ -364,7 +357,6 @@ class ModelStateService extends EventEmitter {
         return success;
     }
 
-    /*-------------- Compatibility Helpers --------------*/
     async handleValidateKey(provider, key) {
         return await this.setApiKey(provider, key);
     }
@@ -377,19 +369,17 @@ class ModelStateService extends EventEmitter {
         const allSettings = await providerSettingsRepository.getAll();
         const apiKeyMap = {};
         allSettings.forEach(s => apiKeyMap[s.provider] = s.api_key);
-        // LLM
         const hasLlmKey = Object.entries(apiKeyMap).some(([provider, key]) => {
             if (!key) return false;
-            if (provider === 'whisper') return false; // whisper는 LLM 없음
+            if (provider === 'whisper') return false;
             // Ollama ships an empty static model list - its models are discovered
             // at runtime, the same way getAvailableModels() resolves them.
             if (provider === 'ollama') return ollamaModelRepository.getInstalledModels().length > 0;
             return PROVIDERS[provider]?.llmModels?.length > 0;
         });
-        // STT
         const hasSttKey = Object.entries(apiKeyMap).some(([provider, key]) => {
             if (!key) return false;
-            if (provider === 'ollama') return false; // ollama는 STT 없음
+            if (provider === 'ollama') return false;
             return PROVIDERS[provider]?.sttModels?.length > 0 || provider === 'whisper';
         });
         return hasLlmKey && hasSttKey;
